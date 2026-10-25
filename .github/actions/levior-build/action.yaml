@@ -1,0 +1,21 @@
+name: levior-build
+description: Build and test the two forked modules (shared by levior.yaml and levior-release.yaml)
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      with:
+        distribution: temurin
+        java-version: '21'
+        cache: maven
+    - name: Build and unit test the two modules
+      shell: bash
+      run: >
+        mvn -B -pl kroxylicious-filters/kroxylicious-record-encryption,kroxylicious-kms-providers/kroxylicious-kms-provider-hashicorp-vault
+        -am -DskipITs verify
+    - name: Record encryption integration tests
+      shell: bash
+      run: >
+        mvn -B -pl kroxylicious-integration-tests -am
+        -DskipUTs -Dit.test='RecordEncryption*IT,HeaderRecordEncryptionOpenBaoIT'
+        -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false verify

@@ -1,0 +1,45 @@
+name: levior-release
+
+on:
+  push:
+    tags: [ 'v0.25.1-levior.*' ]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: The tag must be on branch levior
+        run: |
+          git fetch origin levior
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/levior; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not reachable from origin/levior"
+            exit 1
+          fi
+      - uses: ./.github/actions/levior-build
+      - name: Collect assets
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir release
+          cp kroxylicious-filters/kroxylicious-record-encryption/target/kroxylicious-record-encryption-0.25.1.jar \
+            "release/kroxylicious-record-encryption-${version}.jar"
+          cp kroxylicious-kms-providers/kroxylicious-kms-provider-hashicorp-vault/target/kroxylicious-kms-provider-hashicorp-vault-0.25.1.jar \
+            "release/kroxylicious-kms-provider-hashicorp-vault-${version}.jar"
+          (cd release && sha256sum *.jar > SHA256SUMS && cat SHA256SUMS)
+      - name: Create release
+        run: >
+          gh release create "$GITHUB_REF_NAME" --target levior --title "$GITHUB_REF_NAME"
+          --notes "Kroxylicious 0.25.1 plus the Levior patch set (see LEVIOR.md)."
+          release/*.jar release/SHA256SUMS

@@ -170,6 +170,7 @@ The `RecordEncryption*IT` tests run once per KMS test facade (Vault and others i
 skipped by upstream assumptions. `HeaderRecordEncryptionOpenBaoIT` runs against its own OpenBao 2.7.1 container.
 On macOS with Docker Desktop also set `DOCKER_HOST=unix:///Users/<you>/.docker/run/docker.sock`.
 The workflow `.github/workflows/levior.yaml` runs the same two commands on every push and pull request to `levior`.
+The steps live in the composite action `.github/actions/levior-build`, shared with the release workflow.
 
 ## Rebase onto a new upstream tag
 
@@ -180,4 +181,13 @@ Then update the `v0.25.1` mentions in this file and run the build above.
 
 ## Release
 
-Described by Task 6 of the plan (tags `v0.25.1-levior.<N>`). Not set up yet.
+Pushing a tag `v0.25.1-levior.<N>` runs `.github/workflows/levior-release.yaml`. It fails unless the tagged commit is
+reachable from `origin/levior`, runs the same build and tests as `levior.yaml`, and creates the GitHub Release with
+`kroxylicious-record-encryption-0.25.1-levior.<N>.jar`, `kroxylicious-kms-provider-hashicorp-vault-0.25.1-levior.<N>.jar`
+and `SHA256SUMS`. It uses only `GITHUB_TOKEN`.
+
+To release: wait for a green `levior` run on the commit (`gh run list -R simlau/kroxylicious -b levior`; `cancel-in-progress`
+can cancel runs, so tag only a commit with a successful run), then
+
+    git tag -a v0.25.1-levior.<N> -m "levior release <N>"
+    git push origin v0.25.1-levior.<N>
