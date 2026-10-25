@@ -7,6 +7,9 @@
 package io.kroxylicious.filter.encryption.encrypt;
 
 import java.nio.ByteBuffer;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -24,6 +27,7 @@ import io.kroxylicious.filter.encryption.dek.Dek;
 import io.kroxylicious.filter.encryption.dek.DestroyedDekException;
 import io.kroxylicious.filter.encryption.dek.ExhaustedDekException;
 import io.kroxylicious.kafka.common.record.internal.MemoryRecords;
+import io.kroxylicious.kafka.common.record.internal.MutableRecordBatch;
 import io.kroxylicious.kafka.common.utils.ByteBufferOutputStream;
 import io.kroxylicious.kafka.transform.RecordStream;
 import io.kroxylicious.kms.service.Serde;
@@ -114,6 +118,138 @@ public class InBandEncryptionManager<K, E> implements EncryptionManager<K> {
             return CompletableFuture.completedFuture(records);
         }
         return attemptEncrypt(topicName, partition, encryptionScheme, records, 0, bufferAllocator, totalRecords);
+    }
+
+    @Override
+    @NonNull
+    public CompletionStage<MemoryRecords> encryptPerRecord(@NonNull String topicName,
+                                                           int partition,
+                                                           @NonNull List<EncryptionScheme<K>> encryptionSchemes,
+                                                           @NonNull MemoryRecords records,
+                                                           @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator) {
+        int totalRecords = countRecordsOutsideControlBatches(records);
+        if (encryptionSchemes.size() != totalRecords) {
+            throw new IllegalArgumentException("got " + encryptionSchemes.size() + " encryption schemes for " + totalRecords + " records");
+        }
+        // the number of records to encrypt with each scheme, so we reserve exactly that many encryptions per DEK
+        Map<EncryptionScheme<K>, Integer> recordsPerScheme = new LinkedHashMap<>();
+        for (EncryptionScheme<K> scheme : encryptionSchemes) {
+            if (scheme != null) {
+                recordsPerScheme.merge(scheme, 1, Integer::sum);
+            }
+        }
+        if (recordsPerScheme.isEmpty()) {
+            return CompletableFuture.completedFuture(records);
+        }
+        return attemptEncryptPerRecord(topicName, partition, encryptionSchemes, recordsPerScheme, records, 0, bufferAllocator);
+    }
+
+    /**
+     * Counts the records the way {@link RecordStream} indexes them: control batches are skipped.
+     */
+    private static int countRecordsOutsideControlBatches(@NonNull MemoryRecords records) {
+        int count = 0;
+        for (MutableRecordBatch batch : records.batches()) {
+            if (!batch.isControlBatch()) {
+                Integer batchCount = batch.countOrNull();
+                if (batchCount == null) {
+                    // for magic < 2 the batch header has no count
+                    for (var ignored : batch) {
+                        count++;
+                    }
+                }
+                else {
+                    count += batchCount;
+                }
+            }
+        }
+        return count;
+    }
+
+    private CompletionStage<MemoryRecords> attemptEncryptPerRecord(@NonNull String topicName,
+                                                                   int partition,
+                                                                   @NonNull List<EncryptionScheme<K>> encryptionSchemes,
+                                                                   @NonNull Map<EncryptionScheme<K>, Integer> recordsPerScheme,
+                                                                   @NonNull MemoryRecords records,
+                                                                   int attempt,
+                                                                   @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator) {
+        if (attempt >= MAX_ATTEMPTS) {
+            return CompletableFuture.failedFuture(
+                    new RequestNotSatisfiable("failed to reserve EDEKs for " + recordsPerScheme.size() + " KEKs to encrypt " + encryptionSchemes.size()
+                            + " records for topic " + topicName + " partition " + partition + " after " + attempt + " attempts",
+                            new NetworkException("Failed to encrypt record(s) because there were no valid encryption keys")));
+        }
+        List<EncryptionScheme<K>> schemes = List.copyOf(recordsPerScheme.keySet());
+        return RecordEncryptionUtil.join(schemes.stream().map(this::currentDek).toList()).thenCompose(deks -> {
+            // if one is not alive we know a previous encrypt call has removed it from the cache and fall through to retry encrypt
+            if (deks.stream().noneMatch(Dek::isDestroyed)) {
+                Map<EncryptionScheme<K>, Dek<E>> dekPerScheme = new LinkedHashMap<>();
+                for (int i = 0; i < schemes.size(); i++) {
+                    dekPerScheme.put(schemes.get(i), deks.get(i));
+                }
+                try {
+                    return CompletableFuture.completedFuture(encryptBatchesPerRecord(dekPerScheme,
+                            recordsPerScheme,
+                            topicName,
+                            partition,
+                            encryptionSchemes,
+                            records,
+                            bufferAllocator));
+                }
+                catch (DestroyedDekException | ExhaustedDekException e) {
+                    // encryptBatchesPerRecord has rotated the DEK which could not provide the encryptions
+                    // fall through to recursive call below...
+                }
+                catch (Exception e) {
+                    return CompletableFuture.failedFuture(e);
+                }
+            }
+            return attemptEncryptPerRecord(topicName, partition, encryptionSchemes, recordsPerScheme, records, attempt + 1, bufferAllocator);
+        });
+    }
+
+    @NonNull
+    private MemoryRecords encryptBatchesPerRecord(@NonNull Map<EncryptionScheme<K>, Dek<E>> dekPerScheme,
+                                                  @NonNull Map<EncryptionScheme<K>, Integer> recordsPerScheme,
+                                                  @NonNull String topicName,
+                                                  int partition,
+                                                  @NonNull List<EncryptionScheme<K>> encryptionSchemes,
+                                                  @NonNull MemoryRecords memoryRecords,
+                                                  @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator) {
+        ByteBuffer recordBuffer = ByteBuffer.allocate(recordBufferInitialBytes);
+        do {
+            // as in encryptBatches, create new encryptors for each attempt
+            Map<EncryptionScheme<K>, PerRecordEncryptor.Selected<K, E>> selectedPerScheme = new LinkedHashMap<>();
+            try {
+                for (var entry : dekPerScheme.entrySet()) {
+                    EncryptionScheme<K> scheme = entry.getKey();
+                    Dek<E> dek = entry.getValue();
+                    Dek<E>.Encryptor encryptor;
+                    try {
+                        encryptor = dek.encryptor(recordsPerScheme.get(scheme));
+                    }
+                    catch (DestroyedDekException | ExhaustedDekException e) {
+                        rotateKeyContext(scheme, dek);
+                        throw e;
+                    }
+                    selectedPerScheme.put(scheme, new PerRecordEncryptor.Selected<>(
+                            new RecordEncryptor<>(topicName, partition, encryption, scheme, edekSerde, recordBuffer), encryptor));
+                }
+                return RecordStream.ofRecordsWithIndex(memoryRecords)
+                        .mapPerRecord((batch, kafkaRecord, index) -> {
+                            EncryptionScheme<K> scheme = encryptionSchemes.get(index);
+                            return scheme == null ? null : selectedPerScheme.get(scheme);
+                        })
+                        .toMemoryRecords(allocateBufferForEncrypt(memoryRecords, bufferAllocator),
+                                new PerRecordEncryptor<>(selectedPerScheme.values()));
+            }
+            catch (BufferTooSmallException e) {
+                recordBuffer = growBuffer(recordBuffer, recordBufferMaxBytes);
+            }
+            finally {
+                selectedPerScheme.values().forEach(selected -> selected.encryptor().close());
+            }
+        } while (true);
     }
 
     private ByteBufferOutputStream allocateBufferForEncrypt(@NonNull MemoryRecords records,

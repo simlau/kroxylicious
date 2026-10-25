@@ -28,6 +28,7 @@ import io.micrometer.core.instrument.Metrics;
 
 import io.kroxylicious.filter.encryption.common.FilterThreadExecutor;
 import io.kroxylicious.filter.encryption.config.CipherSpec;
+import io.kroxylicious.filter.encryption.config.CommonEncryptionConfig;
 import io.kroxylicious.filter.encryption.config.EncryptionBufferConfig;
 import io.kroxylicious.filter.encryption.config.EncryptionConfigurationException;
 import io.kroxylicious.filter.encryption.config.KekSelectorService;
@@ -65,7 +66,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
  * @param <E> The type of encrypted DEK
  */
 @Plugin(configType = RecordEncryptionConfig.class)
-public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionConfig, SharedEncryptionContext<K, E>> {
+public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionConfig, SharedEncryptionContext<K, E, RecordEncryptionConfig>> {
 
     /**
      * Creates a new factory instance, invoked by the plugin framework.
@@ -119,9 +120,18 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
 
     @Override
     @SuppressWarnings("java:S2638") // Tightening UnknownNullness
-    public SharedEncryptionContext<K, E> initialize(FilterFactoryContext context,
-                                                    @NonNull RecordEncryptionConfig configuration)
+    public SharedEncryptionContext<K, E, RecordEncryptionConfig> initialize(FilterFactoryContext context,
+                                                                            @NonNull RecordEncryptionConfig configuration)
             throws PluginConfigurationException {
+        return initializeSharedContext(context, configuration);
+    }
+
+    /**
+     * Builds the KMS, DEK manager and DEK caches shared by the filter instances of a record encryption filter factory.
+     * Used by {@link RecordEncryption} and {@link HeaderRecordEncryption}, so both build the same stack from the same configuration.
+     */
+    static <K, E, C extends CommonEncryptionConfig> SharedEncryptionContext<K, E, C> initializeSharedContext(FilterFactoryContext context,
+                                                                                                             @NonNull C configuration) {
         Objects.requireNonNull(configuration, "configuration must not be null");
         LOGGER.atDebug()
                 .addKeyValue("encryptionBuffer", configuration.encryptionBuffer())
@@ -146,22 +156,10 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
     @Override
     @SuppressWarnings("java:S2638") // Tightening UnknownNullness
     public RecordEncryptionFilter<K> createFilter(FilterFactoryContext context,
-                                                  @NonNull SharedEncryptionContext<K, E> sharedEncryptionContext) {
-        ScheduledExecutorService filterThreadExecutor = context.filterDispatchExecutor();
-        FilterThreadExecutor executor = new FilterThreadExecutor(filterThreadExecutor);
-        EncryptionBufferConfig encryptionBufferConfig = sharedEncryptionContext.configuration().encryptionBuffer();
-        var encryptionManager = new InBandEncryptionManager<>(Encryption.V2,
-                sharedEncryptionContext.dekManager().edekSerde(),
-                encryptionBufferConfig.minSizeBytes(),
-                encryptionBufferConfig.maxSizeBytes(),
-                sharedEncryptionContext.encryptionDekCache(),
-                executor);
-
-        var decryptionManager = new InBandDecryptionManager<>(EncryptionResolver.ALL,
-                sharedEncryptionContext.dekManager(),
-                sharedEncryptionContext.decryptionDekCache(),
-                executor,
-                false);
+                                                  @NonNull SharedEncryptionContext<K, E, RecordEncryptionConfig> sharedEncryptionContext) {
+        FilterThreadExecutor executor = new FilterThreadExecutor(context.filterDispatchExecutor());
+        var encryptionManager = createEncryptionManager(sharedEncryptionContext, executor);
+        var decryptionManager = createDecryptionManager(sharedEncryptionContext, executor, false);
 
         RecordEncryptionConfig configuration = sharedEncryptionContext.configuration();
         KekSelectorService<Object, K> ksPlugin = context.pluginInstance(KekSelectorService.class, configuration.selector());
@@ -169,10 +167,31 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
         return new RecordEncryptionFilter<>(encryptionManager, decryptionManager, kekSelector, executor, configuration.unresolvedKeyPolicy());
     }
 
+    static <K, E> InBandEncryptionManager<K, E> createEncryptionManager(SharedEncryptionContext<K, E, ?> sharedEncryptionContext,
+                                                                        FilterThreadExecutor executor) {
+        EncryptionBufferConfig encryptionBufferConfig = sharedEncryptionContext.configuration().encryptionBuffer();
+        return new InBandEncryptionManager<>(Encryption.V2,
+                sharedEncryptionContext.dekManager().edekSerde(),
+                encryptionBufferConfig.minSizeBytes(),
+                encryptionBufferConfig.maxSizeBytes(),
+                sharedEncryptionContext.encryptionDekCache(),
+                executor);
+    }
+
+    static <K, E> InBandDecryptionManager<K, E> createDecryptionManager(SharedEncryptionContext<K, E, ?> sharedEncryptionContext,
+                                                                        FilterThreadExecutor executor,
+                                                                        boolean deliverShredded) {
+        return new InBandDecryptionManager<>(EncryptionResolver.ALL,
+                sharedEncryptionContext.dekManager(),
+                sharedEncryptionContext.decryptionDekCache(),
+                executor,
+                deliverShredded);
+    }
+
     @NonNull
     @SuppressWarnings("java:S2245") // Pseudorandomness sufficient for generating backoff jitter; not security relevant
     @SuppressFBWarnings("PREDICTABLE_RANDOM") // Pseudorandomness sufficient for generating backoff jitter; not security relevant
-    private static <C, K, E> Kms<K, E> buildKms(RecordEncryptionConfig configuration, KmsService<C, K, E> kmsPlugin) {
+    private static <C, K, E> Kms<K, E> buildKms(CommonEncryptionConfig configuration, KmsService<C, K, E> kmsPlugin) {
         Kms<K, E> kms = kmsPlugin.buildKms();
         kms = InstrumentedKms.wrap(kms, kmsMetrics);
         ExponentialJitterBackoffStrategy backoffStrategy = new ExponentialJitterBackoffStrategy(Duration.ofMillis(500), Duration.ofSeconds(5), 2d,
@@ -182,7 +201,7 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
     }
 
     @NonNull
-    private static <K, E> Kms<K, E> wrapWithCachingKms(RecordEncryptionConfig configuration, Kms<K, E> resilientKms) {
+    private static <K, E> Kms<K, E> wrapWithCachingKms(CommonEncryptionConfig configuration, Kms<K, E> resilientKms) {
         KmsCacheConfig config = configuration.kmsCache();
         LOGGER.atDebug()
                 .addKeyValue("kmsCacheConfig", config)
@@ -194,7 +213,7 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
 
     @Override
     @SuppressWarnings("java:S2638") // Tightening UnknownNullness
-    public void close(@NonNull SharedEncryptionContext<K, E> initializationData) {
+    public void close(@NonNull SharedEncryptionContext<K, E, RecordEncryptionConfig> initializationData) {
         initializationData.kmsServiceCloser().run();
     }
 }

@@ -29,7 +29,61 @@ Decrypted-DEK lifetime. New experimental option `decryptedDekExpireAfterWriteSec
 DEK is dropped, however often it is read. It applies to both decrypt-side caches (`DecryptionDekCache` and the decrypted-DEK
 cache in `CachingKms`). Unset means the upstream behaviour (no hard lifetime).
 
+Filter `HeaderRecordEncryption`: the KEK per record from a header. A second filter factory next to the stock
+`RecordEncryption`, registered the same way (`@Plugin`, `META-INF/services/io.kroxylicious.proxy.filter.FilterFactory`). It
+builds the same KMS stack (instrumented, resilient, caching) and DEK caches from the same `kms`, `kmsConfig` and `experimental`
+options (the parsing is shared through `CommonEncryptionConfig`, so `decryptedDekExpireAfterWriteSeconds` reaches both decrypt
+caches here too). On produce, every record of the request is checked first: the header value must be 1 to 64 characters from
+`[A-Za-z0-9_-]` and occur once; a record carrying `X-Shredded` (any value, any letter case) is a forged shredded marker; with
+`missingHeader: REJECT` a record without the header is invalid. Any of these rejects the whole produce request with
+`INVALID_RECORD` before any KMS call. Then the distinct aliases (`template` with `$(headerValue)` replaced) are resolved through the
+KMS, an unknown alias rejects the request with `INVALID_RECORD` (`unresolvedKeyPolicy: REJECT`, the default here), and each
+partition is encrypted in one pass, each record with the current DEK of its own KEK (`EncryptionManager.encryptPerRecord`). Only
+the record value is encrypted; the headers, including `X-Kek-Id`, stay in plaintext. On fetch it delivers shredded records
+(`deliverShredded`, see above). The proxy never creates keys.
+
 More entries are added by later tasks.
+
+## Config reference: `HeaderRecordEncryption`
+
+```yaml
+filterDefinitions:
+  - name: encrypt
+    type: HeaderRecordEncryption
+    config:
+      kms: VaultKmsService
+      kmsConfig:
+        vaultUrl: http://openbao-active.openbao.svc:8200
+        vaultNamespace: simlau-playground   # or the path prefix /v1/simlau-playground
+        transitEnginePath: transit
+        credentials:
+          kubernetes:
+            vaultRole: proxy
+      selector: HeaderKekSelector
+      selectorConfig:
+        header: X-Kek-Id
+        template: "user-kek-$(headerValue)"
+        missingHeader: REJECT
+      unresolvedKeyPolicy: REJECT
+      experimental:
+        decryptedDekExpireAfterWriteSeconds: 3600
+defaultFilters: [encrypt]
+```
+
+| Field | Required | Default | Meaning |
+|---|---|---|---|
+| `kms`, `kmsConfig` | yes | | As for `RecordEncryption`. |
+| `selector` | yes | | Must be `HeaderKekSelector`; anything else is a config error. |
+| `selectorConfig.header` | yes | | Record header holding the KEK id, matched case-sensitively. |
+| `selectorConfig.template` | yes | | KEK alias; must contain `$(headerValue)` exactly once and no other placeholder. |
+| `selectorConfig.missingHeader` | no | `REJECT` | `REJECT` or `PASSTHROUGH_UNENCRYPTED` for a record without the header. |
+| `unresolvedKeyPolicy` | no | `REJECT` | `REJECT` or `PASSTHROUGH_UNENCRYPTED` for a header naming a key the KMS doesn't have (stock default is `PASSTHROUGH_UNENCRYPTED`). |
+| `experimental` | no | | The same options as `RecordEncryption`, including `decryptedDekExpireAfterWriteSeconds`. |
+
+Caches still apply on produce: a resolved alias is cached for up to `resolvedAliasExpireAfterWriteSeconds` (10 min) and the
+current DEK of a KEK for up to `encryptionDekExpireAfterWriteSeconds` (2 h). A record produced shortly after its key was deleted
+can therefore still be encrypted with the cached DEK instead of being rejected. OpenBao can no longer decrypt its EDEK, so it
+reads as shredded.
 
 ## Build and test
 

@@ -6,7 +6,7 @@
 
 package io.kroxylicious.filter.encryption;
 
-import io.kroxylicious.filter.encryption.config.RecordEncryptionConfig;
+import io.kroxylicious.filter.encryption.config.CommonEncryptionConfig;
 import io.kroxylicious.filter.encryption.decrypt.DecryptionDekCache;
 import io.kroxylicious.filter.encryption.dek.DekManager;
 import io.kroxylicious.filter.encryption.encrypt.EncryptionDekCache;
@@ -25,10 +25,11 @@ import io.kroxylicious.kms.service.Kms;
  *
  * @param <K> The type of KEK id.
  * @param <E> The type of the encrypted DEK.
+ * @param <C> The type of the filter factory's configuration.
  */
-record SharedEncryptionContext<K, E>(Kms<K, E> kms,
-                                     Runnable kmsServiceCloser,
-                                     RecordEncryptionConfig configuration,
-                                     DekManager<K, E> dekManager,
-                                     EncryptionDekCache<K, E> encryptionDekCache,
-                                     DecryptionDekCache<K, E> decryptionDekCache) {}
+record SharedEncryptionContext<K, E, C extends CommonEncryptionConfig>(Kms<K, E> kms,
+                                                                       Runnable kmsServiceCloser,
+                                                                       C configuration,
+                                                                       DekManager<K, E> dekManager,
+                                                                       EncryptionDekCache<K, E> encryptionDekCache,
+                                                                       DecryptionDekCache<K, E> decryptionDekCache) {}

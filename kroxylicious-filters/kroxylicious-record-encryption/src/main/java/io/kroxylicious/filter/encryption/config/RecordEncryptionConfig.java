@@ -7,15 +7,12 @@
 package io.kroxylicious.filter.encryption.config;
 
 import java.util.Map;
-import java.util.Optional;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import io.kroxylicious.kms.service.KmsService;
 import io.kroxylicious.proxy.plugin.PluginImplConfig;
 import io.kroxylicious.proxy.plugin.PluginImplName;
-
-import edu.umd.cs.findbugs.annotations.Nullable;
 
 /**
  * The configuration for the {@link io.kroxylicious.filter.encryption.RecordEncryption} filter factory.
@@ -32,7 +29,8 @@ public record RecordEncryptionConfig(@JsonProperty(required = true) @PluginImplN
                                      @JsonProperty(required = true) @PluginImplName(KekSelectorService.class) String selector,
                                      @PluginImplConfig(implNameProperty = "selector") Object selectorConfig,
                                      @JsonProperty Map<String, Object> experimental,
-                                     @JsonProperty UnresolvedKeyPolicy unresolvedKeyPolicy) {
+                                     @JsonProperty UnresolvedKeyPolicy unresolvedKeyPolicy)
+        implements CommonEncryptionConfig {
 
     /** The default initial size, in bytes, of the buffer used to hold an encrypted record. */
     public static final int RECORD_BUFFER_DEFAULT_INITIAL_BYTES = 1024 * 1024;
@@ -42,67 +40,6 @@ public record RecordEncryptionConfig(@JsonProperty(required = true) @PluginImplN
      */
     public RecordEncryptionConfig {
         experimental = experimental == null ? Map.of() : experimental;
-    }
-
-    /**
-     * Returns the configuration of the caches which sit in front of the KMS.
-     * @return the configuration of the caches which sit in front of the KMS.
-     */
-    public KmsCacheConfig kmsCache() {
-        Integer decryptedDekCacheSize = getExperimentalInt("decryptedDekCacheSize");
-        Long decryptedDekExpireAfterAccessSeconds = getExperimentalLong("decryptedDekExpireAfterAccessSeconds");
-        Integer resolvedAliasCacheSize = getExperimentalInt("resolvedAliasCacheSize");
-        Long resolvedAliasExpireAfterWriteSeconds = getExperimentalLong("resolvedAliasExpireAfterWriteSeconds");
-        Long resolvedAliasRefreshAfterWriteSeconds = getExperimentalLong("resolvedAliasRefreshAfterWriteSeconds");
-        Long notFoundAliasExpireAfterWriteSeconds = getExperimentalLong("notFoundAliasExpireAfterWriteSeconds");
-        Long encryptionDekRefreshAfterWriteSeconds = getExperimentalLong("encryptionDekRefreshAfterWriteSeconds");
-        Long encryptionDekExpireAfterWriteSeconds = getExperimentalLong("encryptionDekExpireAfterWriteSeconds");
-        Long decryptedDekExpireAfterWriteSeconds = getExperimentalLong("decryptedDekExpireAfterWriteSeconds");
-        return new KmsCacheConfig(decryptedDekCacheSize, decryptedDekExpireAfterAccessSeconds, resolvedAliasCacheSize, resolvedAliasExpireAfterWriteSeconds,
-                resolvedAliasRefreshAfterWriteSeconds, notFoundAliasExpireAfterWriteSeconds, encryptionDekRefreshAfterWriteSeconds, encryptionDekExpireAfterWriteSeconds,
-                decryptedDekExpireAfterWriteSeconds);
-    }
-
-    /**
-     * Returns the configuration of the encryption buffer size limits.
-     * @return the configuration of the encryption buffer size limits.
-     */
-    public EncryptionBufferConfig encryptionBuffer() {
-        Integer minimumBufSize = getExperimentalIntOrElse("encryptionBufferMinimumSizeBytes", RECORD_BUFFER_DEFAULT_INITIAL_BYTES);
-        Integer maximumBufSize = getExperimentalIntOrElse("encryptionBufferMaximumSizeBytes", 1024 * 1024 * 8);
-        return new EncryptionBufferConfig(minimumBufSize, maximumBufSize);
-    }
-
-    /**
-     * Returns the configuration of the DEK manager.
-     * @return the configuration of the DEK manager.
-     */
-    public DekManagerConfig dekManager() {
-        Long maxEncryptionsPerDek = getExperimentalLong("maxEncryptionsPerDek");
-        return new DekManagerConfig(maxEncryptionsPerDek);
-
-    }
-
-    @Nullable
-    private Integer getExperimentalInt(String property) {
-        return getExperimentalIntOrElse(property, null);
-    }
-
-    private Integer getExperimentalIntOrElse(String property, Integer defaultValue) {
-        return Optional.ofNullable(experimental.get(property)).map(value -> switch (value) {
-            case Number number -> number.intValue();
-            case String stringValue -> Integer.parseInt(stringValue);
-            default -> throw new IllegalArgumentException("could not convert " + property + " with type " + value.getClass().getSimpleName() + " to Integer");
-        }).orElse(defaultValue);
-    }
-
-    @Nullable
-    private Long getExperimentalLong(String property) {
-        return Optional.ofNullable(experimental.get(property)).map(value -> switch (value) {
-            case Number number -> number.longValue();
-            case String stringValue -> Long.parseLong(stringValue);
-            default -> throw new IllegalArgumentException("could not convert " + property + " with type " + value.getClass().getSimpleName() + " to Long");
-        }).orElse(null);
     }
 
     /**

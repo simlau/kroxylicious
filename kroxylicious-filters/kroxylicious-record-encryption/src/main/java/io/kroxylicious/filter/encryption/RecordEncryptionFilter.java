@@ -149,7 +149,12 @@ class RecordEncryptionFilter<K> implements ProduceRequestFilter, FetchResponseFi
         }
     }
 
-    private CompletionStage<ProduceRequestData> maybeEncodeProduce(ProduceRequestData request, FilterContext context, TopicNameMapping topicNameMapping) {
+    /**
+     * Encrypts the records of the given produce request, selecting the KEK per topic.
+     * Overridden by {@link HeaderRecordEncryptionFilter}, which selects the KEK per record.
+     * A stage that fails with an {@link EncryptionException} gets the client an error response.
+     */
+    CompletionStage<ProduceRequestData> maybeEncodeProduce(ProduceRequestData request, FilterContext context, TopicNameMapping topicNameMapping) {
         var plainRecordsTotal = RecordEncryptionMetrics.plainRecordsCounter(context.getVirtualClusterName());
         var encryptedRecordsTotal = RecordEncryptionMetrics.encryptedRecordsCounter(context.getVirtualClusterName());
         var topicNameToData = request.topicData().stream()
@@ -187,7 +192,7 @@ class RecordEncryptionFilter<K> implements ProduceRequestFilter, FetchResponseFi
                 });
     }
 
-    private static String getName(TopicProduceData topicProduceData, TopicNameMapping topicNameMapping) {
+    static String getName(TopicProduceData topicProduceData, TopicNameMapping topicNameMapping) {
         if (topicProduceData.name() != null && !topicProduceData.name().isEmpty()) {
             return topicProduceData.name();
         }

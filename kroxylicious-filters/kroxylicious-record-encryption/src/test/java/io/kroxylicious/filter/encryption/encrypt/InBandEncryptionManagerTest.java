@@ -7,8 +7,10 @@
 package io.kroxylicious.filter.encryption.encrypt;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.UUID;
@@ -25,10 +27,15 @@ import io.kroxylicious.filter.encryption.common.EncryptionException;
 import io.kroxylicious.filter.encryption.common.FilterThreadExecutor;
 import io.kroxylicious.filter.encryption.config.RecordField;
 import io.kroxylicious.filter.encryption.crypto.Encryption;
+import io.kroxylicious.filter.encryption.crypto.EncryptionHeader;
+import io.kroxylicious.filter.encryption.dek.CipherSpecResolver;
 import io.kroxylicious.filter.encryption.dek.DekManager;
+import io.kroxylicious.kafka.common.header.Header;
+import io.kroxylicious.kafka.common.header.internals.RecordHeader;
 import io.kroxylicious.kafka.common.record.internal.MemoryRecords;
 import io.kroxylicious.kafka.common.record.internal.Record;
 import io.kroxylicious.kafka.common.utils.ByteBufferOutputStream;
+import io.kroxylicious.kafka.common.utils.ByteUtils;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.InMemoryEdek;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.InMemoryKms;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.UnitTestingKmsService;
@@ -182,6 +189,144 @@ class InBandEncryptionManagerTest {
 
         // And Then
         assertThat(encryptFuture2).succeedsWithin(10, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void encryptPerRecordUsesEachRecordsKek() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var encryptionManager = createEncryptionManager(kms, 10000);
+        var kekA = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        var kekB = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        Header other = new RecordHeader("other", "o".getBytes(StandardCharsets.UTF_8));
+        List<Record> initial = List.of(
+                RecordTestUtils.record(0L, 10L, "k0", "v0", new Header[]{ other }),
+                RecordTestUtils.record(1L, 11L, "k1", "v1", new Header[]{}),
+                RecordTestUtils.record(2L, 12L, "k2", "v2", new Header[]{ other }),
+                RecordTestUtils.record(3L, 13L, "k3", "v3", new Header[]{ other }));
+        MemoryRecords records = RecordTestUtils.memoryRecords(initial);
+
+        // When
+        CompletionStage<MemoryRecords> stage = encryptionManager.encryptPerRecord("topic", 0, Arrays.asList(kekA, kekB, kekA, null), records,
+                ByteBufferOutputStream::new);
+
+        // Then
+        assertThat(stage).succeedsWithin(10, TimeUnit.SECONDS).satisfies(encrypted -> {
+            List<Record> out = new ArrayList<>();
+            encrypted.records().forEach(out::add);
+            assertThat(out).hasSize(4);
+            assertThat(kekOf(kms, out.get(0))).isEqualTo(kekA.kekId());
+            assertThat(kekOf(kms, out.get(1))).isEqualTo(kekB.kekId());
+            assertThat(kekOf(kms, out.get(2))).isEqualTo(kekA.kekId());
+            assertThat(RecordTestUtils.recordValueAsString(out.get(3))).isEqualTo("v3");
+            assertThat(out.get(3).headers()).containsExactly(other);
+            for (int i = 0; i < 4; i++) {
+                assertThat(out.get(i).offset()).isEqualTo(i);
+                assertThat(out.get(i).timestamp()).isEqualTo(10L + i);
+                assertThat(RecordTestUtils.recordKeyAsString(out.get(i))).isEqualTo("k" + i);
+            }
+            assertThat(out.get(0).headers()).hasSize(2).endsWith(other);
+            assertThat(out.get(1).headers()).hasSize(1);
+        });
+        assertThat(kms.numDeksGenerated()).isEqualTo(2);
+    }
+
+    @Test
+    void encryptPerRecordWithoutKeksReturnsRecordsUnchanged() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var encryptionManager = createEncryptionManager(kms, 10000);
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(RecordTestUtils.record(0L, 10L, "k0", "v0", new Header[]{})));
+
+        // When
+        CompletionStage<MemoryRecords> stage = encryptionManager.encryptPerRecord("topic", 0, Arrays.asList((EncryptionScheme<UUID>) null), records,
+                ByteBufferOutputStream::new);
+
+        // Then
+        assertThat(stage).succeedsWithin(10, TimeUnit.SECONDS).isSameAs(records);
+        assertThat(kms.numDeksGenerated()).isZero();
+    }
+
+    @Test
+    void encryptPerRecordRotatesDekWithTooFewEncryptionsLeft() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var encryptionManager = createEncryptionManager(kms, 2);
+        var kekA = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        var kekB = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        doEncrypt(encryptionManager, "topic", 0, kekA, List.of(RecordTestUtils.record(new byte[]{ 1 })), new ArrayList<>()).toCompletableFuture().join();
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(
+                RecordTestUtils.record(0L, 10L, "k0", "v0", new Header[]{}),
+                RecordTestUtils.record(1L, 11L, "k1", "v1", new Header[]{}),
+                RecordTestUtils.record(2L, 12L, "k2", "v2", new Header[]{})));
+
+        // When
+        CompletionStage<MemoryRecords> stage = encryptionManager.encryptPerRecord("topic", 0, Arrays.asList(kekA, kekB, kekA), records,
+                ByteBufferOutputStream::new);
+
+        // Then
+        assertThat(stage).succeedsWithin(10, TimeUnit.SECONDS).satisfies(encrypted -> {
+            List<Record> out = new ArrayList<>();
+            encrypted.records().forEach(out::add);
+            assertThat(out).extracting(r -> kekOf(kms, r)).containsExactly(kekA.kekId(), kekB.kekId(), kekA.kekId());
+        });
+        // the first DEK of A had one encryption left, the partition needs two: A gets a second DEK
+        assertThat(kms.numDeksGenerated()).isEqualTo(3);
+    }
+
+    @Test
+    void encryptPerRecordGrowsBuffer() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var encryptionManager = createEncryptionManager(kms, 10000);
+        var kekA = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        var kekB = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(
+                RecordTestUtils.record(0L, ByteBuffer.wrap(new byte[]{ 1 })),
+                RecordTestUtils.record(1L, ByteBuffer.wrap(new byte[RECORD_BUFFER_INITIAL_BYTES + 1]))));
+
+        // When
+        CompletionStage<MemoryRecords> stage = encryptionManager.encryptPerRecord("topic", 0, Arrays.asList(kekA, kekB), records,
+                ByteBufferOutputStream::new);
+
+        // Then
+        assertThat(stage).succeedsWithin(10, TimeUnit.SECONDS).satisfies(encrypted -> {
+            List<Record> out = new ArrayList<>();
+            encrypted.records().forEach(out::add);
+            assertThat(out).extracting(r -> kekOf(kms, r)).containsExactly(kekA.kekId(), kekB.kekId());
+        });
+    }
+
+    @Test
+    void encryptPerRecordRejectsSchemeListOfWrongSize() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var encryptionManager = createEncryptionManager(kms, 10000);
+        var kekA = new EncryptionScheme<>(kms.generateKey(), EnumSet.of(RecordField.RECORD_VALUE));
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(RecordTestUtils.record(new byte[]{ 1 })));
+        List<EncryptionScheme<UUID>> schemes = List.of(kekA, kekA);
+
+        // When / Then
+        assertThatThrownBy(() -> encryptionManager.encryptPerRecord("topic", 0, schemes, records, ByteBufferOutputStream::new))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static UUID kekOf(InMemoryKms kms, Record record) {
+        assertThat(record.headers()).extracting(Header::key).contains(EncryptionHeader.ENCRYPTION_HEADER_NAME);
+        ByteBuffer wrapper = record.value();
+        CipherSpecResolver.ALL.fromSerializedId(wrapper.get());
+        int edekLength = ByteUtils.readUnsignedVarint(wrapper);
+        ByteBuffer edek = wrapper.slice(wrapper.position(), edekLength);
+        return kms.edekSerde().deserialize(edek).kekRef();
+    }
+
+    @NonNull
+    private static InBandEncryptionManager<UUID, InMemoryEdek> createEncryptionManager(InMemoryKms kms, int maxEncryptionsPerDek) {
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        final DekManager<UUID, InMemoryEdek> dekManager = new DekManager<>(new AsyncKms<>(kms, executor), maxEncryptionsPerDek);
+        EncryptionDekCache<UUID, InMemoryEdek> cache = new EncryptionDekCache<>(dekManager, executor, EncryptionDekCache.NO_MAX_CACHE_SIZE, Duration.ofHours(1),
+                Duration.ofHours(1));
+        return createEncryptionManager(dekManager, cache, executor);
     }
 
     @NonNull
