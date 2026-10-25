@@ -32,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
 
@@ -1048,28 +1049,35 @@ class InBandDecryptionManagerTest {
                 headers);
     }
 
-    @Test
-    void otherKmsErrorsStillFail() {
+    // what VaultKms throws for a wrong mount (404 "no handler for route"), a re-created key (400) and a wrong namespace (403)
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "fail to retrieve key 'user-kek-alice', HTTP status code 404.",
+            "fail to retrieve key 'user-kek-alice', HTTP status code 400.",
+            "fail to retrieve key 'user-kek-alice', HTTP status code 403." })
+    void otherKmsErrorsStillFail(String kmsError) {
         // Given
         InMemoryKms kms = getInMemoryKms();
         var kekId = kms.generateKey();
         InMemoryKms spyKms = spy(kms);
-        doReturn(CompletableFuture.failedFuture(new KmsException("cipher: message authentication failed"))).when(spyKms).decryptEdek(any());
+        doReturn(CompletableFuture.failedFuture(new KmsException(kmsError))).when(spyKms).decryptEdek(any());
         var encryptionManager = createEncryptionManager(spyKms, 500_000);
         var decryptionManager = createDecryptionManager(spyKms, true);
         List<Record> encrypted = new ArrayList<>();
         doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(kekId, EnumSet.of(RecordField.RECORD_VALUE)),
                 List.of(RecordTestUtils.record(ARBITRARY_VALUE)), encrypted);
+        var shreddedRecords = new AtomicInteger();
 
         // When
-        var stage = doDecrypt(decryptionManager, "topic", 1, encrypted, new ArrayList<>());
+        var stage = decryptionManager.decrypt("topic", 1, RecordTestUtils.memoryRecords(encrypted), ByteBufferOutputStream::new, shreddedRecords::addAndGet);
 
         // Then
-        assertThat(stage).failsWithin(Duration.ZERO)
+        assertThat(stage.toCompletableFuture()).failsWithin(Duration.ZERO)
                 .withThrowableThat()
                 .havingRootCause()
                 .isExactlyInstanceOf(KmsException.class)
-                .withMessage("cipher: message authentication failed");
+                .withMessage(kmsError);
+        assertThat(shreddedRecords).hasValue(0);
     }
 
     @Test

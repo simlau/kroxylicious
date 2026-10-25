@@ -9,9 +9,12 @@ The project version stays `0.25.1`. Never push to `main` of the fork.
 
 ## Changes
 
-Vault KMS provider: only a missing key is "not found". `VaultKms` maps HTTP 404, and HTTP 400 whose body contains
-`encryption key not found`, to `UnknownKeyException` / `UnknownAliasException`. Every other non-200 (other 400s such as
-`cipher: message authentication failed`, 403, 5xx) is a plain `KmsException`. Stock Kroxylicious treats every 400 as not found.
+Vault KMS provider: only a missing key is "not found". For `decrypt` and `datakey` (`decryptEdek`, `generateDekPair`),
+only HTTP 400 whose body contains `encryption key not found` is `UnknownKeyException`. For reading a key (`resolveAlias`),
+only HTTP 404 with an empty `errors` list is `UnknownAliasException`. Every other non-200 is a plain `KmsException`: other
+400s such as `cipher: message authentication failed`, 403 (wrong namespace or policy), 5xx, and a 404 `no handler for route`,
+which Vault and OpenBao return for a wrong mount or path, so a misconfigured `transitEnginePath` never looks like shredded
+data. Stock Kroxylicious treats every 400 and 404 as not found.
 
 Decrypt: deliver shredded records. `InBandDecryptionManager` takes a `deliverShredded` flag. When it is set, EDEKs are resolved
 per cache key, and a record whose KEK the KMS reports as unknown (`UnknownKeyException`, see above) is delivered as shredded:

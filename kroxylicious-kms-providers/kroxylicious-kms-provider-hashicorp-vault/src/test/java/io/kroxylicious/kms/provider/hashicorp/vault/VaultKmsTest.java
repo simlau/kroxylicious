@@ -165,7 +165,7 @@ class VaultKmsTest {
         // Given
         server.stubFor(
                 get(urlEqualTo("/v1/transit/keys/alias"))
-                        .willReturn(aResponse().withStatus(404)));
+                        .willReturn(aResponse().withStatus(404).withBody("{\"errors\":[]}")));
 
         // When / Then
         var aliasStage = kms.resolveAlias("alias");
@@ -357,22 +357,44 @@ class VaultKmsTest {
 
     }
 
-    static Stream<Arguments> keyMissingResponses() {
+    // decrypt and datakey: OpenBao and Vault answer a missing key with this 400
+    static Stream<Arguments> transitKeyMissingResponses() {
         return Stream.of(
-                Arguments.of(400, "{\"errors\":[\"encryption key not found\"]}"),
-                Arguments.of(404, "{\"errors\":[]}"));
+                Arguments.of(400, "{\"errors\":[\"encryption key not found\"]}"));
     }
 
-    static Stream<Arguments> otherErrorResponses() {
+    // decrypt and datakey: everything else, including the 404 of a wrong mount, is a real error
+    static Stream<Arguments> transitOtherErrorResponses() {
         return Stream.of(
                 Arguments.of(400, "{\"errors\":[\"cipher: message authentication failed\"]}"),
                 Arguments.of(400, "{\"errors\":[\"invalid ciphertext: no prefix\"]}"),
                 Arguments.of(403, "{\"errors\":[\"permission denied\"]}"),
+                Arguments.of(404, "{\"errors\":[\"no handler for route \\\"transitx/decrypt/live\\\". route entry not found.\"]}"),
+                Arguments.of(404, "{\"errors\":[]}"),
+                Arguments.of(404, ""),
+                Arguments.of(404, "<html>not found</html>"),
+                Arguments.of(500, "{\"errors\":[\"internal error\"]}"));
+    }
+
+    // read key: a missing key is a 404 with an empty errors list
+    static Stream<Arguments> readKeyMissingResponses() {
+        return Stream.of(
+                Arguments.of(404, "{\"errors\":[]}"));
+    }
+
+    // read key: everything else, including the 404 of a wrong mount, is a real error
+    static Stream<Arguments> readKeyOtherErrorResponses() {
+        return Stream.of(
+                Arguments.of(400, "{\"errors\":[\"encryption key not found\"]}"),
+                Arguments.of(403, "{\"errors\":[\"permission denied\"]}"),
+                Arguments.of(404, "{\"errors\":[\"no handler for route \\\"transitx/keys/live\\\". route entry not found.\"]}"),
+                Arguments.of(404, ""),
+                Arguments.of(404, "<html>not found</html>"),
                 Arguments.of(500, "{\"errors\":[\"internal error\"]}"));
     }
 
     @ParameterizedTest
-    @MethodSource("keyMissingResponses")
+    @MethodSource("transitKeyMissingResponses")
     void decryptEdekMissingKeyIsUnknownKey(int status, String body) {
         server.stubFor(post(urlEqualTo("/v1/transit/decrypt/kekref"))
                 .willReturn(aResponse().withStatus(status).withBody(body)));
@@ -384,7 +406,7 @@ class VaultKmsTest {
     }
 
     @ParameterizedTest
-    @MethodSource("otherErrorResponses")
+    @MethodSource("transitOtherErrorResponses")
     void decryptEdekOtherErrorIsKmsException(int status, String body) {
         server.stubFor(post(urlEqualTo("/v1/transit/decrypt/kekref"))
                 .willReturn(aResponse().withStatus(status).withBody(body)));
@@ -397,7 +419,7 @@ class VaultKmsTest {
     }
 
     @ParameterizedTest
-    @MethodSource("keyMissingResponses")
+    @MethodSource("transitKeyMissingResponses")
     void generateDekPairMissingKeyIsUnknownKey(int status, String body) {
         server.stubFor(post(urlEqualTo("/v1/transit/datakey/plaintext/kekref"))
                 .willReturn(aResponse().withStatus(status).withBody(body)));
@@ -409,7 +431,7 @@ class VaultKmsTest {
     }
 
     @ParameterizedTest
-    @MethodSource("otherErrorResponses")
+    @MethodSource("transitOtherErrorResponses")
     void generateDekPairOtherErrorIsKmsException(int status, String body) {
         server.stubFor(post(urlEqualTo("/v1/transit/datakey/plaintext/kekref"))
                 .willReturn(aResponse().withStatus(status).withBody(body)));
@@ -422,7 +444,7 @@ class VaultKmsTest {
     }
 
     @ParameterizedTest
-    @MethodSource("keyMissingResponses")
+    @MethodSource("readKeyMissingResponses")
     void resolveAliasMissingKeyIsUnknownAlias(int status, String body) {
         server.stubFor(get(urlEqualTo("/v1/transit/keys/alias"))
                 .willReturn(aResponse().withStatus(status).withBody(body)));
@@ -434,7 +456,7 @@ class VaultKmsTest {
     }
 
     @ParameterizedTest
-    @MethodSource("otherErrorResponses")
+    @MethodSource("readKeyOtherErrorResponses")
     void resolveAliasOtherErrorIsKmsException(int status, String body) {
         server.stubFor(get(urlEqualTo("/v1/transit/keys/alias"))
                 .willReturn(aResponse().withStatus(status).withBody(body)));

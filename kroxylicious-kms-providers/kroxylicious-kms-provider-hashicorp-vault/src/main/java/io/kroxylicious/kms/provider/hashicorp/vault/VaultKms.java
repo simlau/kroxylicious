@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -30,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.kroxylicious.kms.provider.hashicorp.vault.VaultResponse.DataKeyData;
@@ -156,7 +158,7 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
                     .POST(HttpRequest.BodyPublishers.noBody())
                     .build();
 
-            return sendAsync(kekRef.name(), request, DATA_KEY_DATA_TYPE_REF, UnknownKeyException::new)
+            return sendAsync(kekRef.name(), request, DATA_KEY_DATA_TYPE_REF, VaultKms::isTransitKeyNotFound, UnknownKeyException::new)
                     .thenApply(data -> {
                         var secretKey = DestroyableRawSecretKey.takeOwnershipOf(data.plaintext(), AES_KEY_ALGO);
                         return new DekPair<>(new VaultEdek(kekRef.name(), data.ciphertext().getBytes(UTF_8)), secretKey);
@@ -181,7 +183,7 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
 
-            return sendAsync(edek.kekRef(), request, DECRYPT_DATA_TYPE_REF, UnknownKeyException::new)
+            return sendAsync(edek.kekRef(), request, DECRYPT_DATA_TYPE_REF, VaultKms::isTransitKeyNotFound, UnknownKeyException::new)
                     .thenApply(data -> DestroyableRawSecretKey.takeOwnershipOf(data.plaintext(), AES_KEY_ALGO));
         });
     }
@@ -216,7 +218,7 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
             var request = createVaultRequest(token)
                     .uri(vaultTransitEngineUrl.resolve("keys/%s".formatted(encode(alias, UTF_8))))
                     .build();
-            return sendAsync(alias, request, READ_KEY_DATA_TYPE_REF, UnknownAliasException::new)
+            return sendAsync(alias, request, READ_KEY_DATA_TYPE_REF, VaultKms::isReadKeyNotFound, UnknownAliasException::new)
                     .thenApply(d -> new WrappingKey(d.name(), d.latestVersion()));
         }).toCompletableFuture();
     }
@@ -224,9 +226,10 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
     private <T> CompletableFuture<T> sendAsync(String key,
                                                HttpRequest request,
                                                TypeReference<VaultResponse<T>> valueTypeRef,
-                                               Function<String, KmsException> exception) {
+                                               BiPredicate<Integer, String> isNotFound,
+                                               Function<String, KmsException> notFound) {
         return vaultClient.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
-                .thenApply(response -> checkResponseStatus(key, response, exception))
+                .thenApply(response -> checkResponseStatus(key, response, isNotFound, notFound))
                 .thenApply(HttpResponse::body)
                 .thenApply(bytes -> decodeJson(valueTypeRef, bytes))
                 .thenApply(VaultResponse::data);
@@ -253,6 +256,7 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
 
     private static HttpResponse<byte[]> checkResponseStatus(String key,
                                                             HttpResponse<byte[]> response,
+                                                            BiPredicate<Integer, String> isNotFound,
                                                             Function<String, KmsException> notFound) {
         if (response.statusCode() == 200) {
             return response;
@@ -260,7 +264,7 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
         // only decode the body of failed responses, a successful body carries key material
         var uri = response.request().uri();
         var responseBody = new String(response.body(), StandardCharsets.UTF_8);
-        if (isKeyNotFound(response.statusCode(), responseBody)) {
+        if (isNotFound.test(response.statusCode(), responseBody)) {
             LOGGER.atWarn()
                     .addKeyValue("kekRef", key)
                     .addKeyValue("requestUri", uri)
@@ -279,12 +283,30 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
     }
 
     /**
-     * Only a 404, or a 400 that says the key does not exist, means the key is gone.
+     * For {@code decrypt} and {@code datakey}, only a 400 that says the key does not exist means the key is gone.
      * Other 400s (for example {@code cipher: message authentication failed}, which Vault returns
-     * when the key was re-created under the same name) are real errors.
+     * when the key was re-created under the same name) are real errors, and so is a 404: Vault and OpenBao
+     * answer a wrong mount or path with 404 {@code no handler for route}.
      */
-    private static boolean isKeyNotFound(int statusCode, String responseBody) {
-        return statusCode == 404 || (statusCode == 400 && responseBody.contains(KEY_NOT_FOUND_MESSAGE));
+    private static boolean isTransitKeyNotFound(int statusCode, String responseBody) {
+        return statusCode == 400 && responseBody.contains(KEY_NOT_FOUND_MESSAGE);
+    }
+
+    /**
+     * For reading a key, only a 404 with an empty {@code errors} list means the key does not exist.
+     * A 404 with errors (such as {@code no handler for route} for a wrong mount or path), or without a JSON body, is a real error.
+     */
+    private static boolean isReadKeyNotFound(int statusCode, String responseBody) {
+        if (statusCode != 404) {
+            return false;
+        }
+        try {
+            JsonNode errors = OBJECT_MAPPER.readTree(responseBody).get("errors");
+            return errors != null && errors.isArray() && errors.isEmpty();
+        }
+        catch (JsonProcessingException e) {
+            return false;
+        }
     }
 
     @Override
