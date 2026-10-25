@@ -19,8 +19,10 @@ import java.util.stream.StreamSupport;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.InvalidRecordException;
@@ -28,6 +30,11 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.message.FetchRequestData;
+import org.apache.kafka.common.message.FetchResponseData;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.RecordBatch;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -39,6 +46,9 @@ import io.kroxylicious.filter.encryption.HeaderRecordEncryption;
 import io.kroxylicious.filter.encryption.crypto.EncryptionHeader;
 import io.kroxylicious.proxy.config.ConfigurationBuilder;
 import io.kroxylicious.proxy.config.NamedFilterDefinition;
+import io.kroxylicious.proxy.service.HostPort;
+import io.kroxylicious.testing.integration.Request;
+import io.kroxylicious.testing.integration.client.KafkaClient;
 import io.kroxylicious.testing.integration.config.NamedFilterDefinitionBuilder;
 import io.kroxylicious.testing.integration.tester.KroxyliciousTester;
 import io.kroxylicious.testing.kafka.api.KafkaCluster;
@@ -71,6 +81,11 @@ class HeaderRecordEncryptionOpenBaoIT {
     // the decrypted-DEK lifetime is 1 s; this bounds how long the proxy may still serve a key that is gone
     private static final Duration KEY_CHANGE_TIMEOUT = Duration.ofSeconds(60);
     private static final Duration NO_PROGRESS_WINDOW = Duration.ofSeconds(10);
+    // the sender waits for flush(), so everything sent before it goes to the broker as one batch per partition
+    private static final Map<String, Object> ONE_BATCH = Map.of(
+            ProducerConfig.LINGER_MS_CONFIG, 60_000,
+            ProducerConfig.BATCH_SIZE_CONFIG, 1 << 20);
+    private static final int FETCH_MAX_BYTES = 1 << 20;
 
     static KafkaCluster cluster;
 
@@ -103,13 +118,20 @@ class HeaderRecordEncryptionOpenBaoIT {
                 userRecord(topic, b, "b-2", "secret of b 2", 1_003L));
 
         try (var tester = kroxyliciousTester(proxyWithFilter(openBao));
-                var producer = tester.producer()) {
+                var producer = tester.producer(ONE_BATCH)) {
 
             // When
             List<RecordMetadata> produced = sendInOneBatch(producer, records);
 
             // Then
             long endOffset = produced.get(produced.size() - 1).offset() + 1;
+            assertThat(produced).extracting(RecordMetadata::partition).containsOnly(0);
+            assertThat(brokerBatches(topic.name()))
+                    .singleElement()
+                    .satisfies(batch -> {
+                        assertThat(batch.baseOffset()).isEqualTo(produced.get(0).offset());
+                        assertThat(batch.lastOffset()).isEqualTo(endOffset - 1);
+                    });
             List<ConsumerRecord<String, String>> consumed = consumeFromNewGroup(tester, topic, endOffset);
             assertThat(consumed).hasSize(records.size());
             for (int i = 0; i < records.size(); i++) {
@@ -144,7 +166,7 @@ class HeaderRecordEncryptionOpenBaoIT {
                 userRecord(topic, b, "b-2", "secret of b 2", 2_003L));
 
         try (var tester = kroxyliciousTester(proxyWithFilter(openBao));
-                var producer = tester.producer()) {
+                var producer = tester.producer(ONE_BATCH)) {
             List<RecordMetadata> produced = sendInOneBatch(producer, records);
             long endOffset = produced.get(produced.size() - 1).offset() + 1;
             // loads the DEKs into the proxy's decrypt caches, as a consumer that read the topic before would
@@ -207,7 +229,7 @@ class HeaderRecordEncryptionOpenBaoIT {
                 userRecord(topic, b, "b-2", "secret of b 2", 4_001L));
 
         try (var tester = kroxyliciousTester(proxyWithFilter(openBao));
-                var producer = tester.producer()) {
+                var producer = tester.producer(ONE_BATCH)) {
             List<RecordMetadata> produced = sendInOneBatch(producer, records);
             long endOffset = produced.get(produced.size() - 1).offset() + 1;
             consumeFromNewGroup(tester, topic, endOffset);
@@ -235,7 +257,7 @@ class HeaderRecordEncryptionOpenBaoIT {
                     userRecord(topic, b, "b-2", "secret of b 2", 5_001L));
 
             try (var tester = kroxyliciousTester(proxyWithFilter(ownOpenBao));
-                    var producer = tester.producer()) {
+                    var producer = tester.producer(ONE_BATCH)) {
                 List<RecordMetadata> produced = sendInOneBatch(producer, records);
                 long endOffset = produced.get(produced.size() - 1).offset() + 1;
                 consumeFromNewGroup(tester, topic, endOffset);
@@ -309,6 +331,11 @@ class HeaderRecordEncryptionOpenBaoIT {
         return new ProducerRecord<>(topic.name(), 0, timestamp, key, value, headers);
     }
 
+    /**
+     * Sends the records with a producer configured with {@link #ONE_BATCH}, to partition 0 of an empty topic, then flushes.
+     * @throws IllegalStateException if the broker did not store them as exactly one batch, so a test relying on
+     * records of several users in one batch fails instead of silently testing less.
+     */
     private static List<RecordMetadata> sendInOneBatch(Producer<String, String> producer, List<ProducerRecord<String, String>> records) throws Exception {
         List<Future<RecordMetadata>> sends = records.stream().map(producer::send).toList();
         producer.flush();
@@ -316,7 +343,44 @@ class HeaderRecordEncryptionOpenBaoIT {
         for (Future<RecordMetadata> send : sends) {
             produced.add(send.get(5, TimeUnit.SECONDS));
         }
+        List<RecordBatch> batches = brokerBatches(records.get(0).topic());
+        long firstOffset = produced.get(0).offset();
+        long lastOffset = produced.get(produced.size() - 1).offset();
+        if (batches.size() != 1 || batches.get(0).baseOffset() != firstOffset || batches.get(0).lastOffset() != lastOffset) {
+            throw new IllegalStateException("records at offsets %d..%d were not stored as one batch: %s".formatted(firstOffset, lastOffset,
+                    batches.stream().map(b -> b.baseOffset() + ".." + b.lastOffset()).toList()));
+        }
         return produced;
+    }
+
+    /**
+     * Fetches partition 0 of the topic from offset 0 directly from the broker, bypassing the proxy and the consumer,
+     * which hides batch boundaries.
+     * @return the record batches as the broker stores them.
+     */
+    private static List<RecordBatch> brokerBatches(String topicName) {
+        HostPort broker = HostPort.parse(cluster.getBootstrapServers().split(",")[0]);
+        var fetch = new FetchRequestData()
+                .setReplicaId(-1)
+                .setMaxWaitMs(0)
+                .setMinBytes(1)
+                .setMaxBytes(FETCH_MAX_BYTES)
+                .setTopics(List.of(new FetchRequestData.FetchTopic()
+                        .setTopic(topicName)
+                        .setPartitions(List.of(new FetchRequestData.FetchPartition()
+                                .setPartition(0)
+                                .setFetchOffset(0)
+                                .setPartitionMaxBytes(FETCH_MAX_BYTES)))));
+        try (var client = new KafkaClient(broker.host(), broker.port())) {
+            var response = (FetchResponseData) client.getSync(new Request(ApiKeys.FETCH, (short) 12, "batch-check", fetch)).payload().message();
+            FetchResponseData.PartitionData partition = response.responses().get(0).partitions().get(0);
+            if (response.errorCode() != 0 || partition.errorCode() != 0) {
+                throw new IllegalStateException("direct fetch of %s failed: error codes %d, %d".formatted(topicName, response.errorCode(), partition.errorCode()));
+            }
+            List<RecordBatch> batches = new ArrayList<>();
+            ((MemoryRecords) partition.records()).batches().forEach(batches::add);
+            return batches;
+        }
     }
 
     private static List<ConsumerRecord<String, String>> consumeFromNewGroup(KroxyliciousTester tester, Topic topic, long endOffset) {
@@ -346,22 +410,26 @@ class HeaderRecordEncryptionOpenBaoIT {
     /**
      * Polls for {@link #NO_PROGRESS_WINDOW} with a new consumer group from the earliest offset.
      * @param delivered collects every record the consumer got
-     * @return true if the consumer got no record in that time or failed with an exception.
+     * @return true if the consumer got no record in that time or its poll failed with an exception.
      */
     private static boolean newGroupMakesNoProgress(KroxyliciousTester tester, Topic topic, List<ConsumerRecord<String, String>> delivered) {
         try (var consumer = tester.consumer(newGroup())) {
             consumer.subscribe(List.of(topic.name()));
             long deadline = System.nanoTime() + NO_PROGRESS_WINDOW.toNanos();
             while (System.nanoTime() < deadline) {
-                var records = consumer.poll(Duration.ofMillis(200));
+                ConsumerRecords<String, String> records;
+                try {
+                    records = consumer.poll(Duration.ofMillis(200));
+                }
+                catch (KafkaException e) {
+                    // the fetch failed visibly, which counts as no progress
+                    return true;
+                }
                 if (!records.isEmpty()) {
                     records.forEach(delivered::add);
                     return false;
                 }
             }
-            return true;
-        }
-        catch (KafkaException e) {
             return true;
         }
     }

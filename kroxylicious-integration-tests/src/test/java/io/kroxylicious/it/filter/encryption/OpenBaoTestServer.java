@@ -141,7 +141,12 @@ final class OpenBaoTestServer implements AutoCloseable {
 
     @Override
     public void close() {
-        container.close();
+        try {
+            container.close();
+        }
+        finally {
+            httpClient.close();
+        }
     }
 
     private URI url() {
