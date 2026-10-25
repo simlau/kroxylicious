@@ -9,6 +9,7 @@ package io.kroxylicious.filter.encryption.decrypt;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -35,6 +36,7 @@ public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
 
     private final String topicName;
     private final int partition;
+    private final boolean stripShreddedHeaders;
     private RecordBatch batch;
 
     private ByteBuffer transformedValue;
@@ -46,8 +48,20 @@ public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
      * @param partition the index of the partition from which the records are being fetched.
      */
     public RecordDecryptor(@NonNull String topicName, int partition) {
+        this(topicName, partition, false);
+    }
+
+    /**
+     * Creates a record decryptor.
+     * @param topicName the name of the topic from which the records are being fetched.
+     * @param partition the index of the partition from which the records are being fetched.
+     * @param stripShreddedHeaders whether every {@value #SHREDDED_HEADER_NAME} header (in any letter case) already on a
+     * fetched record is removed, so that only this decryptor marks records as shredded.
+     */
+    public RecordDecryptor(@NonNull String topicName, int partition, boolean stripShreddedHeaders) {
         this.topicName = Objects.requireNonNull(topicName);
         this.partition = partition;
+        this.stripShreddedHeaders = stripShreddedHeaders;
     }
 
     @Override
@@ -75,7 +89,7 @@ public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
         }
         if (decryptor == null) {
             transformedValue = record.value();
-            transformedHeaders = record.headers();
+            transformedHeaders = withoutForeignShreddedHeaders(record.headers());
             return;
         }
 
@@ -89,24 +103,53 @@ public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
                 decryptor,
                 (v, h) -> {
                     transformedValue = v;
-                    transformedHeaders = h;
+                    transformedHeaders = withoutForeignShreddedHeaders(h);
                 });
 
     }
 
     /**
-     * Returns the headers of a shredded record: the record's headers in their order, without the encryption header,
+     * Returns the headers of a shredded record: the record's headers in their order, without the encryption header
+     * (and without any {@value #SHREDDED_HEADER_NAME} header if {@link #stripShreddedHeaders} is set),
      * followed by the {@value #SHREDDED_HEADER_NAME} header.
      */
-    private static Header[] shreddedHeaders(Header[] headers) {
+    private Header[] shreddedHeaders(Header[] headers) {
         List<Header> result = new ArrayList<>(headers.length + 1);
         for (Header header : headers) {
-            if (!EncryptionHeader.ENCRYPTION_HEADER_NAME.equals(header.key())) {
+            if (!EncryptionHeader.ENCRYPTION_HEADER_NAME.equals(header.key()) && !isForeignShreddedHeader(header)) {
                 result.add(header);
             }
         }
         result.add(new RecordHeader(SHREDDED_HEADER_NAME, SHREDDED_HEADER_VALUE.clone()));
         return result.toArray(Header[]::new);
+    }
+
+    /**
+     * Returns the given headers without any {@value #SHREDDED_HEADER_NAME} header if {@link #stripShreddedHeaders} is set.
+     * Returns the given array itself if nothing is removed, so the common case allocates nothing.
+     */
+    @Nullable
+    private Header[] withoutForeignShreddedHeaders(@Nullable Header[] headers) {
+        if (!stripShreddedHeaders || headers == null) {
+            return headers;
+        }
+        List<Header> result = null;
+        for (int i = 0; i < headers.length; i++) {
+            Header header = headers[i];
+            if (isForeignShreddedHeader(header)) {
+                if (result == null) {
+                    result = new ArrayList<>(Arrays.asList(headers).subList(0, i));
+                }
+            }
+            else if (result != null) {
+                result.add(header);
+            }
+        }
+        return result == null ? headers : result.toArray(Header[]::new);
+    }
+
+    private boolean isForeignShreddedHeader(@NonNull Header header) {
+        return stripShreddedHeaders && SHREDDED_HEADER_NAME.equalsIgnoreCase(header.key());
     }
 
     @Override

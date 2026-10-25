@@ -62,6 +62,8 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
      * @param filterThreadExecutor the executor used to complete futures on the filter thread.
      * @param deliverShredded whether a record whose KEK the KMS reports as unknown (see {@link UnknownKeyException}) is delivered as
      * a shredded record (null value and a {@value RecordDecryptor#SHREDDED_HEADER_NAME} header) instead of failing the decryption.
+     * When set, any {@value RecordDecryptor#SHREDDED_HEADER_NAME} header (in any letter case) already on a fetched record is removed,
+     * so the header only ever marks records this manager shredded.
      */
     public InBandDecryptionManager(EncryptionResolver encryptionResolver,
                                    @NonNull DekManager<K, E> dekManager,
@@ -263,6 +265,6 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
         return RecordStream.ofRecordsWithIndex(records)
                 .mapPerRecord((batch, record, index) -> decryptorList.get(index))
                 .toMemoryRecords(buffer,
-                        new RecordDecryptor<>(topicName, partition));
+                        new RecordDecryptor<>(topicName, partition, deliverShredded));
     }
 }

@@ -1104,6 +1104,66 @@ class InBandDecryptionManagerTest {
                 .isExactlyInstanceOf(UnknownKeyException.class);
     }
 
+    @Test
+    void foreignShreddedHeaderRemovedOnFetch() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var goneKekId = kms.generateKey();
+        var liveKekId = kms.generateKey();
+        var encryptionManager = createEncryptionManager(kms, 500_000);
+        var decryptionManager = createDecryptionManager(kms, true);
+        Header kekHeader = new RecordHeader("X-Kek-Id", "carol".getBytes(StandardCharsets.UTF_8));
+        Header other = new RecordHeader("other", new byte[]{ 1, 2 });
+        var plainRecord = RecordTestUtils.record(0L, 0L, ARBITRARY_KEY, "plain",
+                new Header[]{ kekHeader, new RecordHeader("X-Shredded", "true".getBytes(StandardCharsets.UTF_8)), other });
+        var liveRecord = RecordTestUtils.record(1L, 0L, ARBITRARY_KEY, ARBITRARY_VALUE,
+                new Header[]{ new RecordHeader("x-shredded", "true".getBytes(StandardCharsets.UTF_8)), kekHeader, other });
+        var goneRecord = RecordTestUtils.record(2L, 0L, ARBITRARY_KEY, ARBITRARY_VALUE_2,
+                new Header[]{ kekHeader, new RecordHeader("X-SHREDDED", "false".getBytes(StandardCharsets.UTF_8)), other,
+                        new RecordHeader("X-Shredded", null) });
+        List<Record> input = new ArrayList<>();
+        input.add(plainRecord);
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(liveKekId, EnumSet.of(RecordField.RECORD_VALUE)), List.of(liveRecord), input);
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(goneKekId, EnumSet.of(RecordField.RECORD_VALUE)), List.of(goneRecord), input);
+        kms.deleteKey(goneKekId);
+
+        // When
+        List<Record> decrypted = new ArrayList<>();
+        var stage = doDecrypt(decryptionManager, "topic", 1, input, decrypted);
+
+        // Then
+        assertThat(stage).succeedsWithin(Duration.ZERO);
+        assertThat(decrypted).extracting(Record::offset).containsExactly(0L, 1L, 2L);
+        assertThat(decrypted).extracting(RecordTestUtils::recordValueAsString).containsExactly("plain", ARBITRARY_VALUE, null);
+        assertThat(decrypted).extracting(Record::headers).containsExactly(
+                new Header[]{ kekHeader, other },
+                new Header[]{ kekHeader, other },
+                new Header[]{ kekHeader, other, SHREDDED_HEADER });
+    }
+
+    @Test
+    void stockFilterKeepsForeignShreddedHeader() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var kekId = kms.generateKey();
+        var encryptionManager = createEncryptionManager(kms, 500_000);
+        var decryptionManager = createDecryptionManager(kms, false);
+        Header[] headers = { new RecordHeader("x-shredded", "true".getBytes(StandardCharsets.UTF_8)) };
+        List<Record> input = new ArrayList<>();
+        input.add(RecordTestUtils.record(0L, 0L, ARBITRARY_KEY, "plain", headers));
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(kekId, EnumSet.of(RecordField.RECORD_VALUE)),
+                List.of(RecordTestUtils.record(1L, 0L, ARBITRARY_KEY, ARBITRARY_VALUE, headers)), input);
+
+        // When
+        List<Record> decrypted = new ArrayList<>();
+        var stage = doDecrypt(decryptionManager, "topic", 1, input, decrypted);
+
+        // Then
+        assertThat(stage).succeedsWithin(Duration.ZERO);
+        assertThat(decrypted).extracting(RecordTestUtils::recordValueAsString).containsExactly("plain", ARBITRARY_VALUE);
+        assertThat(decrypted).extracting(Record::headers).containsExactly(headers, headers);
+    }
+
     public TestingDek getSerializedGeneratedEdek(InMemoryKms kms, int i) {
         var generatedEdek = kms.getGeneratedEdek(i);
         var edek = generatedEdek.edek();
