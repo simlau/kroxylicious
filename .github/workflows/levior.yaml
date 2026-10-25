@@ -33,5 +33,5 @@ jobs:
       - name: Record encryption integration tests
         run: >
           mvn -B -pl kroxylicious-integration-tests -am
-          -DskipUTs -Dit.test='RecordEncryption*IT'
+          -DskipUTs -Dit.test='RecordEncryption*IT,HeaderRecordEncryptionOpenBaoIT'
           -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false verify

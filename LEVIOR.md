@@ -42,7 +42,74 @@ partition is encrypted in one pass, each record with the current DEK of its own 
 the record value is encrypted; the headers, including `X-Kek-Id`, stay in plaintext. On fetch it delivers shredded records
 (`deliverShredded`, see above). The proxy never creates keys.
 
+Fetch: the proxy owns `X-Shredded`. With `deliverShredded` (that is, under `HeaderRecordEncryption`), `RecordDecryptor` removes
+every `X-Shredded` header, in any letter case, from every fetched record: unencrypted records, decrypted records, and shredded
+records before it appends its own. This matches the produce side, which rejects `X-Shredded` in any letter case. The stock
+filter leaves headers as they are.
+
+Integration test `HeaderRecordEncryptionOpenBaoIT` runs the filter against OpenBao 2.7.1 (`quay.io/openbao/openbao`, digest
+pinned in `OpenBaoTestServer`) and Kafka. It covers two users in one batch, a deleted key (shredded, the consumer reaches the
+end offset), a foreign `X-Shredded`, a re-created key and OpenBao down (both fail the fetch, nothing is shredded), and a bad
+`X-Kek-Id`. The proxy uses a token with only the proxy policy of `levior/openbao` `tofu/modules/transit-app`, in namespace
+`simlau-playground`.
+
 More entries are added by later tasks.
+
+## Consumer contract
+
+What a consumer reading through `HeaderRecordEncryption` gets:
+
+- A shredded record on fetch: value `null`, header `X-Shredded` with value `true` (UTF-8), the encryption header removed, record
+  key, offset, timestamp and all other headers (including `X-Kek-Id`) unchanged, in order. It means *cryptographically erased*:
+  the record can never be decrypted again. It does not mean that data already materialized from the record downstream is gone.
+- The proxy owns `X-Shredded`. Under `HeaderRecordEncryption` a produced record carrying an `X-Shredded` header is rejected
+  (`INVALID_RECORD`), and on fetch any `X-Shredded` header already on a record (written by a client that bypassed the proxy, or
+  before the proxy existed) is removed. The proxy adds exactly one `X-Shredded: true`, and only to records it shredded. So a
+  fetched `X-Shredded: true` always means the proxy found the KEK gone. (Both directions match the header name in any letter
+  case.)
+
+`null` plus `X-Shredded: true` therefore means cryptographically erased: OpenBao answered that the record's KEK does not exist.
+The proxy delivers the record instead of failing the fetch, so the consumer keeps its position and reads on.
+
+A consumer that treats a `null` value as a tombstone gets tombstone-like semantics: a table or cache keyed by the record key
+drops the entry. But erasing the KEK does not remove data already materialized downstream. For example, a Kafka Streams
+aggregation that ignores `null` values keeps the earlier contributions of the erased records, and a projection that copied the
+value into a database keeps that copy. Such apps must handle `X-Shredded` themselves.
+
+A deleted key takes effect on fetch once the proxy's decrypted DEKs of that key have expired, at most
+`decryptedDekExpireAfterWriteSeconds` after the fetch that loaded them (3600 s in the Levior config). Until then, records still
+decrypt.
+
+Tombstones: a record with a `null` value is never encrypted and passes through unchanged in both directions (on fetch only a
+foreign `X-Shredded` is removed). It is still checked on produce like any other record: under `missingHeader: REJECT` a tombstone
+without `X-Kek-Id`, a tombstone with an invalid `X-Kek-Id`, and under `unresolvedKeyPolicy: REJECT` a tombstone whose `X-Kek-Id`
+names a key OpenBao does not have, reject the whole produce request with `INVALID_RECORD`. So a compaction delete for a user whose
+key is already gone is rejected.
+
+Other KMS failures are not shredding. A re-created key (OpenBao answers 400 `cipher: message authentication failed`), a wrong
+mount (404 `no handler for route`), a wrong namespace or policy (403), 5xx and an unreachable OpenBao fail the fetch: the proxy
+closes the connection and the client retries without progress until the cause is fixed. No record is marked shredded.
+
+## Behaviour change for the stock filter
+
+The Vault KMS provider jar is shared by both filters, so the stricter not-found mapping (see "Changes") also applies to the stock
+`RecordEncryption` filter with `kms: VaultKmsService`:
+
+| Vault/OpenBao answer | Upstream | This branch |
+|---|---|---|
+| `decrypt`/`datakey`: 400 `encryption key not found` | `UnknownKeyException` | same |
+| `decrypt`/`datakey`: other 400, e.g. `cipher: message authentication failed` (key re-created under the same name) | `UnknownKeyException`: the fetch answers `RESOURCE_NOT_FOUND` (91) | `KmsException`: the proxy closes the connection |
+| `decrypt`/`datakey`: 404 `no handler for route` (wrong mount or path) | `UnknownKeyException`: 91 | `KmsException`: the proxy closes the connection |
+| read `keys/<name>`: 404 with an empty `errors` list | `UnknownAliasException` | same |
+| read `keys/<name>`: 404 `no handler for route`, or any 400 | `UnknownAliasException`: with the stock default `unresolvedKeyPolicy: PASSTHROUGH_UNENCRYPTED` the records are stored unencrypted | `KmsException`: the produce request fails |
+
+Why: a wrong `transitEnginePath` or a re-created key is a configuration or operations error, not a missing key. Upstream
+reports it as a missing key, so on fetch it looks like deleted data, and on produce a mistyped mount silently stores plaintext
+under the stock default policy. For `HeaderRecordEncryption` it would be worse: a missing key means shredded, so a wrong mount
+would deliver every record as erased. Now these errors fail loudly and the client retries.
+
+This is a bug fix independent of the header KEK. It goes upstream as a separate pull request (Vault provider only), before or
+without the `HeaderRecordEncryption` filter.
 
 ## Config reference: `HeaderRecordEncryption`
 
@@ -97,9 +164,10 @@ Build and unit test the two modules (and what they depend on):
 
 Integration tests of record encryption:
 
-    mvn -B -pl kroxylicious-integration-tests -am -DskipUTs -Dit.test='RecordEncryption*IT' -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false verify
+    mvn -B -pl kroxylicious-integration-tests -am -DskipUTs -Dit.test='RecordEncryption*IT,HeaderRecordEncryptionOpenBaoIT' -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false verify
 
-The tests run once per KMS test facade (Vault and others in Testcontainers). Five runs of one test are skipped by upstream assumptions.
+The `RecordEncryption*IT` tests run once per KMS test facade (Vault and others in Testcontainers). Five runs of one test are
+skipped by upstream assumptions. `HeaderRecordEncryptionOpenBaoIT` runs against its own OpenBao 2.7.1 container.
 On macOS with Docker Desktop also set `DOCKER_HOST=unix:///Users/<you>/.docker/run/docker.sock`.
 The workflow `.github/workflows/levior.yaml` runs the same two commands on every push and pull request to `levior`.
 
