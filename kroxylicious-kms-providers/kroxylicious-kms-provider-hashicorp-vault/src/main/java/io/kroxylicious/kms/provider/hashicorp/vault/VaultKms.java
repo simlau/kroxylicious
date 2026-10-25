@@ -250,12 +250,18 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
         }
     }
 
+    private static final String KEY_NOT_FOUND_MESSAGE = "encryption key not found";
+
     private static HttpResponse<byte[]> checkResponseStatus(String key,
                                                             HttpResponse<byte[]> response,
                                                             Function<String, KmsException> notFound) {
-        if (response.statusCode() == 404 || response.statusCode() == 400) {
-            var uri = response.request().uri();
-            var responseBody = new String(response.body(), StandardCharsets.UTF_8);
+        if (response.statusCode() == 200) {
+            return response;
+        }
+        // only decode the body of failed responses, a successful body carries key material
+        var uri = response.request().uri();
+        var responseBody = new String(response.body(), StandardCharsets.UTF_8);
+        if (isKeyNotFound(response.statusCode(), responseBody)) {
             LOGGER.atWarn()
                     .addKeyValue("kekRef", key)
                     .addKeyValue("requestUri", uri)
@@ -264,18 +270,22 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
                     .log("Key not found in Vault");
             throw notFound.apply("key '%s' is not found.".formatted(key));
         }
-        else if (response.statusCode() != 200) {
-            var uri = response.request().uri();
-            var responseBody = new String(response.body(), StandardCharsets.UTF_8);
-            LOGGER.atWarn()
-                    .addKeyValue("kekRef", key)
-                    .addKeyValue("requestUri", uri)
-                    .addKeyValue("statusCode", response.statusCode())
-                    .addKeyValue("responseBody", responseBody)
-                    .log("Failed to retrieve key from Vault");
-            throw new KmsException("fail to retrieve key '%s', HTTP status code %d.".formatted(key, response.statusCode()));
-        }
-        return response;
+        LOGGER.atWarn()
+                .addKeyValue("kekRef", key)
+                .addKeyValue("requestUri", uri)
+                .addKeyValue("statusCode", response.statusCode())
+                .addKeyValue("responseBody", responseBody)
+                .log("Failed to retrieve key from Vault");
+        throw new KmsException("fail to retrieve key '%s', HTTP status code %d.".formatted(key, response.statusCode()));
+    }
+
+    /**
+     * Only a 404, or a 400 that says the key does not exist, means the key is gone.
+     * Other 400s (for example {@code cipher: message authentication failed}, which Vault returns
+     * when the key was re-created under the same name) are real errors.
+     */
+    private static boolean isKeyNotFound(int statusCode, String responseBody) {
+        return statusCode == 404 || (statusCode == 400 && responseBody.contains(KEY_NOT_FOUND_MESSAGE));
     }
 
     @Override

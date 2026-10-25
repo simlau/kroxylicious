@@ -9,7 +9,11 @@ The project version stays `0.25.1`. Never push to `main` of the fork.
 
 ## Changes
 
-Filled in by later tasks. Empty so far.
+Vault KMS provider: only a missing key is "not found". `VaultKms` maps HTTP 404, and HTTP 400 whose body contains
+`encryption key not found`, to `UnknownKeyException` / `UnknownAliasException`. Every other non-200 (other 400s such as
+`cipher: message authentication failed`, 403, 5xx) is a plain `KmsException`. Stock Kroxylicious treats every 400 as not found.
+
+More entries are added by later tasks.
 
 ## Build and test
 
@@ -25,7 +29,7 @@ Integration tests of record encryption:
 
     mvn -B -pl kroxylicious-integration-tests -am -DskipUTs -Dit.test='RecordEncryption*IT' -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false verify
 
-The tests run once per KMS test facade (5 runs of 22 tests, Vault and others in Testcontainers). Five runs of one test are skipped by upstream assumptions.
+The tests run once per KMS test facade (Vault and others in Testcontainers). Five runs of one test are skipped by upstream assumptions.
 On macOS with Docker Desktop also set `DOCKER_HOST=unix:///Users/<you>/.docker/run/docker.sock`.
 The workflow `.github/workflows/levior.yaml` runs the same two commands on every push and pull request to `levior`.
 
@@ -34,7 +38,7 @@ The workflow `.github/workflows/levior.yaml` runs the same two commands on every
     git fetch upstream tag <new tag> --no-tags
     git rebase --onto <new tag> v0.25.1 levior
 
-Then update the tag in this file and in the workflow expectations, and run the build above.
+Then update the `v0.25.1` mentions in this file and in `.github/workflows/levior.yaml`, and run the build above.
 
 ## Release
 

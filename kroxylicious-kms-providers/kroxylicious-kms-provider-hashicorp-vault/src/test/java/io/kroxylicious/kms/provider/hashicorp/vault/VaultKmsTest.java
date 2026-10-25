@@ -35,6 +35,7 @@ import io.kroxylicious.kms.service.DekPair;
 import io.kroxylicious.kms.service.DestroyableRawSecretKey;
 import io.kroxylicious.kms.service.KmsException;
 import io.kroxylicious.kms.service.UnknownAliasException;
+import io.kroxylicious.kms.service.UnknownKeyException;
 import io.kroxylicious.proxy.config.secret.InlinePassword;
 import io.kroxylicious.testing.kms.SecretKeyUtils;
 
@@ -354,6 +355,95 @@ class VaultKmsTest {
         assertThatThrownBy(() -> new VaultKms(uri, new StaticTokenProvider("token"), Duration.ZERO, builder -> builder))
                 .isInstanceOf(IllegalArgumentException.class);
 
+    }
+
+    static Stream<Arguments> keyMissingResponses() {
+        return Stream.of(
+                Arguments.of(400, "{\"errors\":[\"encryption key not found\"]}"),
+                Arguments.of(404, "{\"errors\":[]}"));
+    }
+
+    static Stream<Arguments> otherErrorResponses() {
+        return Stream.of(
+                Arguments.of(400, "{\"errors\":[\"cipher: message authentication failed\"]}"),
+                Arguments.of(400, "{\"errors\":[\"invalid ciphertext: no prefix\"]}"),
+                Arguments.of(403, "{\"errors\":[\"permission denied\"]}"),
+                Arguments.of(500, "{\"errors\":[\"internal error\"]}"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("keyMissingResponses")
+    void decryptEdekMissingKeyIsUnknownKey(int status, String body) {
+        server.stubFor(post(urlEqualTo("/v1/transit/decrypt/kekref"))
+                .willReturn(aResponse().withStatus(status).withBody(body)));
+
+        assertThat(kms.decryptEdek(new VaultEdek("kekref", new byte[]{ 1, 2, 3 })))
+                .failsWithin(Duration.ofSeconds(5))
+                .withThrowableThat()
+                .withCauseInstanceOf(UnknownKeyException.class);
+    }
+
+    @ParameterizedTest
+    @MethodSource("otherErrorResponses")
+    void decryptEdekOtherErrorIsKmsException(int status, String body) {
+        server.stubFor(post(urlEqualTo("/v1/transit/decrypt/kekref"))
+                .willReturn(aResponse().withStatus(status).withBody(body)));
+
+        assertThat(kms.decryptEdek(new VaultEdek("kekref", new byte[]{ 1, 2, 3 })))
+                .failsWithin(Duration.ofSeconds(5))
+                .withThrowableThat()
+                .withCauseExactlyInstanceOf(KmsException.class)
+                .withMessageContaining("HTTP status code " + status);
+    }
+
+    @ParameterizedTest
+    @MethodSource("keyMissingResponses")
+    void generateDekPairMissingKeyIsUnknownKey(int status, String body) {
+        server.stubFor(post(urlEqualTo("/v1/transit/datakey/plaintext/kekref"))
+                .willReturn(aResponse().withStatus(status).withBody(body)));
+
+        assertThat(kms.generateDekPair(new WrappingKey("kekref", 1)))
+                .failsWithin(Duration.ofSeconds(5))
+                .withThrowableThat()
+                .withCauseInstanceOf(UnknownKeyException.class);
+    }
+
+    @ParameterizedTest
+    @MethodSource("otherErrorResponses")
+    void generateDekPairOtherErrorIsKmsException(int status, String body) {
+        server.stubFor(post(urlEqualTo("/v1/transit/datakey/plaintext/kekref"))
+                .willReturn(aResponse().withStatus(status).withBody(body)));
+
+        assertThat(kms.generateDekPair(new WrappingKey("kekref", 1)))
+                .failsWithin(Duration.ofSeconds(5))
+                .withThrowableThat()
+                .withCauseExactlyInstanceOf(KmsException.class)
+                .withMessageContaining("HTTP status code " + status);
+    }
+
+    @ParameterizedTest
+    @MethodSource("keyMissingResponses")
+    void resolveAliasMissingKeyIsUnknownAlias(int status, String body) {
+        server.stubFor(get(urlEqualTo("/v1/transit/keys/alias"))
+                .willReturn(aResponse().withStatus(status).withBody(body)));
+
+        assertThat(kms.resolveAlias("alias"))
+                .failsWithin(Duration.ofSeconds(5))
+                .withThrowableThat()
+                .withCauseInstanceOf(UnknownAliasException.class);
+    }
+
+    @ParameterizedTest
+    @MethodSource("otherErrorResponses")
+    void resolveAliasOtherErrorIsKmsException(int status, String body) {
+        server.stubFor(get(urlEqualTo("/v1/transit/keys/alias"))
+                .willReturn(aResponse().withStatus(status).withBody(body)));
+
+        assertThat(kms.resolveAlias("alias"))
+                .failsWithin(Duration.ofSeconds(5))
+                .withThrowableThat()
+                .withCauseExactlyInstanceOf(KmsException.class)
+                .withMessageContaining("HTTP status code " + status);
     }
 
     @Test
