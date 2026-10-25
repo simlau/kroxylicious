@@ -77,6 +77,25 @@ class CachingKmsTest {
     }
 
     @Test
+    void testDecryptEdekNotCachedIfExpireAfterWriteZero() {
+        // Given
+        Kms<Long, Long> kms = mock(Kms.class);
+        SecretKey secretKey = mock(SecretKey.class);
+        when(kms.decryptEdek(any())).thenReturn(CompletableFuture.completedFuture(secretKey));
+        var caching = (CachingKms<Long, Long>) CachingKms.wrap(kms, 1L, Duration.ofHours(1), Duration.ZERO, 1L, Duration.ZERO, Duration.ofMinutes(8),
+                Duration.ofSeconds(30));
+        caching.decryptEdek(1L).toCompletableFuture().join();
+        caching.decryptDekCacheCleanUp();
+
+        // When
+        var secondDecrypt = caching.decryptEdek(1L);
+
+        // Then
+        assertThat(secondDecrypt).succeedsWithin(5, TimeUnit.SECONDS).isSameAs(secretKey);
+        verify(kms, times(2)).decryptEdek(1L);
+    }
+
+    @Test
     void testResolveAliasCached() {
         Kms<Long, Long> kms = mock(Kms.class);
         long kekId = 2L;

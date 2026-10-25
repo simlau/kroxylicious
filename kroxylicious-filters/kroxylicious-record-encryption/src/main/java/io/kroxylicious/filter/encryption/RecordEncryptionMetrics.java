@@ -33,6 +33,7 @@ public class RecordEncryptionMetrics {
     // Base Metric Names
     private static final String ENCRYPTED_RECORDS = "kroxylicious_filter_record_encryption_encrypted_records";
     private static final String PLAIN_RECORDS = "kroxylicious_filter_record_encryption_plain_records";
+    private static final String SHREDDED_RECORDS = "kroxylicious_filter_record_encryption_shredded_records";
 
     /**
      * Creates a provider of counters of the records which the filter encrypted.
@@ -51,6 +52,16 @@ public class RecordEncryptionMetrics {
      */
     public static Meter.MeterProvider<Counter> plainRecordsCounter(String clusterName) {
         return buildCounterMeterProvider(PLAIN_RECORDS, "A count of records the filter sent without encrypting them.",
+                clusterName);
+    }
+
+    /**
+     * Creates a provider of counters of the records the filter delivered as shredded because their KEK no longer exists.
+     * @param clusterName the name of the virtual cluster.
+     * @return a provider of counters of the records the filter delivered as shredded.
+     */
+    public static Meter.MeterProvider<Counter> shreddedRecordsCounter(String clusterName) {
+        return buildCounterMeterProvider(SHREDDED_RECORDS, "A count of records the filter delivered as shredded because their KEK no longer exists.",
                 clusterName);
     }
 

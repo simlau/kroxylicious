@@ -7,6 +7,7 @@
 package io.kroxylicious.filter.encryption.decrypt;
 
 import java.util.concurrent.CompletionStage;
+import java.util.function.IntConsumer;
 import java.util.function.IntFunction;
 
 import io.kroxylicious.kafka.common.record.internal.MemoryRecords;
@@ -25,6 +26,7 @@ public interface DecryptionManager {
      * @param partition The partition index
      * @param records The records
      * @param bufferAllocator Allocator of ByteBufferOutputStream
+     * @param shreddedRecordsListener Called with the number of records delivered as shredded, if there are any
      * @return A completion stage that completes with the output MemoryRecords when all the records have been processed and transformed.
      */
     @NonNull
@@ -32,5 +34,6 @@ public interface DecryptionManager {
                                            @NonNull String topicName,
                                            int partition,
                                            @NonNull MemoryRecords records,
-                                           @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator);
+                                           @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator,
+                                           @NonNull IntConsumer shreddedRecordsListener);
 }

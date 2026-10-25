@@ -7,10 +7,15 @@
 package io.kroxylicious.filter.encryption.decrypt;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
+import io.kroxylicious.filter.encryption.crypto.EncryptionHeader;
 import io.kroxylicious.filter.encryption.dek.Dek;
 import io.kroxylicious.kafka.common.header.Header;
+import io.kroxylicious.kafka.common.header.internals.RecordHeader;
 import io.kroxylicious.kafka.common.record.internal.Record;
 import io.kroxylicious.kafka.common.record.internal.RecordBatch;
 import io.kroxylicious.kafka.transform.RecordTransform;
@@ -23,6 +28,10 @@ import edu.umd.cs.findbugs.annotations.Nullable;
  * @param <E> The type of encrypted DEK.
  */
 public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
+
+    /** The name of the header added to a shredded record: a record whose KEK no longer exists. */
+    public static final String SHREDDED_HEADER_NAME = "X-Shredded";
+    private static final byte[] SHREDDED_HEADER_VALUE = "true".getBytes(StandardCharsets.UTF_8);
 
     private final String topicName;
     private final int partition;
@@ -52,6 +61,11 @@ public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
         if (batch == null) {
             throw new IllegalStateException();
         }
+        if (decryptState != null && decryptState.isShredded()) {
+            transformedValue = null;
+            transformedHeaders = shreddedHeaders(record.headers());
+            return;
+        }
         final Dek<E>.Decryptor decryptor;
         if (decryptState == null) {
             decryptor = null;
@@ -78,6 +92,21 @@ public class RecordDecryptor<E> implements RecordTransform<DecryptState<E>> {
                     transformedHeaders = h;
                 });
 
+    }
+
+    /**
+     * Returns the headers of a shredded record: the record's headers in their order, without the encryption header,
+     * followed by the {@value #SHREDDED_HEADER_NAME} header.
+     */
+    private static Header[] shreddedHeaders(Header[] headers) {
+        List<Header> result = new ArrayList<>(headers.length + 1);
+        for (Header header : headers) {
+            if (!EncryptionHeader.ENCRYPTION_HEADER_NAME.equals(header.key())) {
+                result.add(header);
+            }
+        }
+        result.add(new RecordHeader(SHREDDED_HEADER_NAME, SHREDDED_HEADER_VALUE.clone()));
+        return result.toArray(Header[]::new);
     }
 
     @Override

@@ -75,6 +75,7 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String AES_KEY_ALGO = "AES";
     private static final Pattern LEGAL_API_VERSION_REGEX = Pattern.compile("^/?v1/.+");
+    private static final String KEY_NOT_FOUND_MESSAGE = "encryption key not found";
     private static final TypeReference<VaultResponse<DataKeyData>> DATA_KEY_DATA_TYPE_REF = new TypeReference<>() {
     };
     private static final TypeReference<VaultResponse<ReadKeyData>> READ_KEY_DATA_TYPE_REF = new TypeReference<>() {
@@ -249,8 +250,6 @@ public class VaultKms implements Kms<WrappingKey, VaultEdek> {
             throw new UncheckedIOException("Failed to decode Vault response as JSON", e);
         }
     }
-
-    private static final String KEY_NOT_FOUND_MESSAGE = "encryption key not found";
 
     private static HttpResponse<byte[]> checkResponseStatus(String key,
                                                             HttpResponse<byte[]> response,

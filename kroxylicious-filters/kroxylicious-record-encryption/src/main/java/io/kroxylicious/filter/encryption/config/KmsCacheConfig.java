@@ -9,6 +9,8 @@ package io.kroxylicious.filter.encryption.config;
 import java.time.Duration;
 import java.util.function.Function;
 
+import edu.umd.cs.findbugs.annotations.Nullable;
+
 import static java.util.Objects.requireNonNullElse;
 
 /**
@@ -22,6 +24,8 @@ import static java.util.Objects.requireNonNullElse;
  * @param notFoundAliasExpireAfterWriteDuration How long an unresolvable alias is remembered before the KMS is asked to resolve it again.
  * @param encryptionDekCacheRefreshAfterWriteDuration How long after being cached a DEK used for encryption becomes eligible for a refresh.
  * @param encryptionDekCacheExpireAfterWriteDuration How long after being cached a DEK used for encryption is removed from the cache.
+ * @param decryptedDekExpireAfterWriteDuration How long after being cached a decrypted DEK is removed from the caches, however often it is read,
+ * or null for no such limit.
  */
 public record KmsCacheConfig(
                              Integer decryptedDekCacheSize,
@@ -31,10 +35,12 @@ public record KmsCacheConfig(
                              Duration resolvedAliasRefreshAfterWriteDuration,
                              Duration notFoundAliasExpireAfterWriteDuration,
                              Duration encryptionDekCacheRefreshAfterWriteDuration,
-                             Duration encryptionDekCacheExpireAfterWriteDuration) {
+                             Duration encryptionDekCacheExpireAfterWriteDuration,
+                             @Nullable Duration decryptedDekExpireAfterWriteDuration) {
 
     /**
-     * Creates a KMS cache config, applying defaults for any null argument.
+     * Creates a KMS cache config, applying defaults for any null argument
+     * except {@code decryptedDekExpireAfterWriteDuration}, for which null means no limit.
      */
     public KmsCacheConfig {
         decryptedDekCacheSize = requireNonNullElse(decryptedDekCacheSize, 1000);
@@ -54,7 +60,8 @@ public record KmsCacheConfig(
                    Long resolvedAliasExpireAfterWriteSeconds,
                    Long resolvedAliasRefreshAfterWriteSeconds,
                    Long notFoundAliasExpireAfterWriteSeconds,
-                   Long decryptedDekRefreshAfterWriteSeconds,
+                   Long encryptionDekRefreshAfterWriteSeconds,
+                   Long encryptionDekExpireAfterWriteSeconds,
                    Long decryptedDekExpireAfterWriteSeconds) {
         this(mapNotNull(decryptedDekCacheSize, Function.identity()),
                 (Duration) mapNotNull(decryptedDekExpireAfterAccessSeconds, Duration::ofSeconds),
@@ -62,7 +69,8 @@ public record KmsCacheConfig(
                 mapNotNull(resolvedAliasExpireAfterWriteSeconds, Duration::ofSeconds),
                 mapNotNull(resolvedAliasRefreshAfterWriteSeconds, Duration::ofSeconds),
                 mapNotNull(notFoundAliasExpireAfterWriteSeconds, Duration::ofSeconds),
-                mapNotNull(decryptedDekRefreshAfterWriteSeconds, Duration::ofSeconds),
+                mapNotNull(encryptionDekRefreshAfterWriteSeconds, Duration::ofSeconds),
+                mapNotNull(encryptionDekExpireAfterWriteSeconds, Duration::ofSeconds),
                 mapNotNull(decryptedDekExpireAfterWriteSeconds, Duration::ofSeconds));
     }
 

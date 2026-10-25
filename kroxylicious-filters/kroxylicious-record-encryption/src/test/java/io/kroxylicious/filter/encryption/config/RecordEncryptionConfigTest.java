@@ -72,7 +72,13 @@ class RecordEncryptionConfigTest {
                 Arguments.of("encryptionDekExpireAfterWriteSeconds", "5", Duration.ofSeconds(5),
                         (Function<KmsCacheConfig, Duration>) KmsCacheConfig::encryptionDekCacheExpireAfterWriteDuration),
                 Arguments.of("encryptionDekExpireAfterWriteSeconds", null, Duration.ofHours(2),
-                        (Function<KmsCacheConfig, Duration>) KmsCacheConfig::encryptionDekCacheExpireAfterWriteDuration));
+                        (Function<KmsCacheConfig, Duration>) KmsCacheConfig::encryptionDekCacheExpireAfterWriteDuration),
+                Arguments.of("decryptedDekExpireAfterWriteSeconds", 3600, Duration.ofHours(1),
+                        (Function<KmsCacheConfig, Duration>) KmsCacheConfig::decryptedDekExpireAfterWriteDuration),
+                Arguments.of("decryptedDekExpireAfterWriteSeconds", "3600", Duration.ofHours(1),
+                        (Function<KmsCacheConfig, Duration>) KmsCacheConfig::decryptedDekExpireAfterWriteDuration),
+                Arguments.of("decryptedDekExpireAfterWriteSeconds", null, null,
+                        (Function<KmsCacheConfig, Duration>) KmsCacheConfig::decryptedDekExpireAfterWriteDuration));
     }
 
     @ParameterizedTest(name = "{0} - {1}")

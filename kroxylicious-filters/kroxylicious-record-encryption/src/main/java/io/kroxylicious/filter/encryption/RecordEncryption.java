@@ -137,7 +137,8 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
         KmsCacheConfig cacheConfig = configuration.kmsCache();
         EncryptionDekCache<K, E> encryptionDekCache = new EncryptionDekCache<>(dekManager, null, EncryptionDekCache.NO_MAX_CACHE_SIZE,
                 cacheConfig.encryptionDekCacheRefreshAfterWriteDuration(), cacheConfig.encryptionDekCacheExpireAfterWriteDuration());
-        DecryptionDekCache<K, E> decryptionDekCache = new DecryptionDekCache<>(dekManager, null, DecryptionDekCache.NO_MAX_CACHE_SIZE);
+        DecryptionDekCache<K, E> decryptionDekCache = new DecryptionDekCache<>(dekManager, null, DecryptionDekCache.NO_MAX_CACHE_SIZE,
+                cacheConfig.decryptedDekExpireAfterWriteDuration());
         return new SharedEncryptionContext<>(kms, kmsPlugin::close, configuration, dekManager, encryptionDekCache, decryptionDekCache);
     }
 
@@ -159,7 +160,8 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
         var decryptionManager = new InBandDecryptionManager<>(EncryptionResolver.ALL,
                 sharedEncryptionContext.dekManager(),
                 sharedEncryptionContext.decryptionDekCache(),
-                executor);
+                executor,
+                false);
 
         RecordEncryptionConfig configuration = sharedEncryptionContext.configuration();
         KekSelectorService<Object, K> ksPlugin = context.pluginInstance(KekSelectorService.class, configuration.selector());
@@ -185,7 +187,8 @@ public class RecordEncryption<K, E> implements FilterFactory<RecordEncryptionCon
         LOGGER.atDebug()
                 .addKeyValue("kmsCacheConfig", config)
                 .log("KMS cache configuration");
-        return CachingKms.wrap(resilientKms, config.decryptedDekCacheSize(), config.decryptedDekExpireAfterAccessDuration(), config.resolvedAliasCacheSize(),
+        return CachingKms.wrap(resilientKms, config.decryptedDekCacheSize(), config.decryptedDekExpireAfterAccessDuration(),
+                config.decryptedDekExpireAfterWriteDuration(), config.resolvedAliasCacheSize(),
                 config.resolvedAliasExpireAfterWriteDuration(), config.resolvedAliasRefreshAfterWriteDuration(), config.notFoundAliasExpireAfterWriteDuration());
     }
 

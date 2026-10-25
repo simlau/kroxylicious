@@ -9,11 +9,14 @@ package io.kroxylicious.filter.encryption.decrypt;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.IntConsumer;
 import java.util.function.IntFunction;
 
 import io.kroxylicious.filter.encryption.common.EncryptionException;
@@ -30,6 +33,7 @@ import io.kroxylicious.kafka.common.record.internal.Record;
 import io.kroxylicious.kafka.common.utils.ByteBufferOutputStream;
 import io.kroxylicious.kafka.transform.RecordStream;
 import io.kroxylicious.kms.service.Serde;
+import io.kroxylicious.kms.service.UnknownKeyException;
 
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
@@ -48,6 +52,7 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
     private final DecryptionDekCache<K, E> dekCache;
 
     private final EncryptionResolver encryptionResolver;
+    private final boolean deliverShredded;
 
     /**
      * Creates a decryption manager.
@@ -55,15 +60,19 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
      * @param dekManager the DEK manager used to decrypt encrypted DEKs.
      * @param dekCache the cache of DEKs used for decryption.
      * @param filterThreadExecutor the executor used to complete futures on the filter thread.
+     * @param deliverShredded whether a record whose KEK the KMS reports as unknown (see {@link UnknownKeyException}) is delivered as
+     * a shredded record (null value and a {@value RecordDecryptor#SHREDDED_HEADER_NAME} header) instead of failing the decryption.
      */
     public InBandDecryptionManager(EncryptionResolver encryptionResolver,
                                    @NonNull DekManager<K, E> dekManager,
                                    @NonNull DecryptionDekCache<K, E> dekCache,
-                                   @Nullable FilterThreadExecutor filterThreadExecutor) {
+                                   @Nullable FilterThreadExecutor filterThreadExecutor,
+                                   boolean deliverShredded) {
         this.encryptionResolver = encryptionResolver;
         this.dekManager = Objects.requireNonNull(dekManager);
         this.dekCache = Objects.requireNonNull(dekCache);
         this.filterThreadExecutor = filterThreadExecutor;
+        this.deliverShredded = deliverShredded;
     }
 
     /**
@@ -96,7 +105,8 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
     public CompletionStage<MemoryRecords> decrypt(@NonNull String topicName,
                                                   int partition,
                                                   @NonNull MemoryRecords records,
-                                                  @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator) {
+                                                  @NonNull IntFunction<ByteBufferOutputStream> bufferAllocator,
+                                                  @NonNull IntConsumer shreddedRecordsListener) {
         if (records.sizeInBytes() == 0) {
             // no records to transform, return input without modification
             return CompletableFuture.completedFuture(records);
@@ -112,11 +122,13 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
         return decryptStates.thenApply(
                 decryptStateList -> {
                     try {
-                        return decrypt(topicName,
+                        MemoryRecords decrypted = decrypt(topicName,
                                 partition,
                                 records,
                                 decryptStateList,
                                 allocateBufferForDecrypt(records, bufferAllocator));
+                        notifyShredded(decryptStateList, shreddedRecordsListener);
+                        return decrypted;
                     }
                     finally {
                         for (var ds : decryptStateList) {
@@ -164,26 +176,43 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
                 states.add(DecryptState.none());
             }
         });
+        if (deliverShredded) {
+            // Lookup the decryptors for the cache keys, tolerating keys whose KEK the KMS reports as unknown
+            return filterThreadExecutor.completingOnFilterThread(dekCache.getAllAllowingUnknownKeys(cacheKeys, filterThreadExecutor))
+                    .thenApply(cacheKeyDekMap -> {
+                        Map<DecryptionDekCache.CacheKey<E>, Dek<E>> deks = new HashMap<>();
+                        Set<DecryptionDekCache.CacheKey<E>> shreddedKeys = new HashSet<>();
+                        cacheKeyDekMap.forEach((cacheKey, dek) -> dek.ifPresentOrElse(d -> deks.put(cacheKey, d), () -> shreddedKeys.add(cacheKey)));
+                        return issueDecryptors(deks, shreddedKeys, cacheKeys, states);
+                    });
+        }
         // Lookup the decryptors for the cache keys
         return filterThreadExecutor.completingOnFilterThread(dekCache.getAll(cacheKeys, filterThreadExecutor))
                 .thenApply(cacheKeyDecryptorMap ->
                 // Once we have the decryptors from the cache...
-                issueDecryptors(cacheKeyDecryptorMap, cacheKeys, states));
+                issueDecryptors(cacheKeyDecryptorMap, Set.of(), cacheKeys, states));
     }
 
     private @NonNull List<DecryptState<E>> issueDecryptors(@NonNull Map<DecryptionDekCache.CacheKey<E>, Dek<E>> cacheKeyDecryptorMap,
+                                                           @NonNull Set<DecryptionDekCache.CacheKey<E>> shreddedKeys,
                                                            @NonNull List<DecryptionDekCache.CacheKey<E>> cacheKeys,
                                                            @NonNull List<DecryptState<E>> states) {
         Map<DecryptionDekCache.CacheKey<E>, Dek<E>.Decryptor> issuedDecryptors = new HashMap<>();
         try {
             for (int index = 0, cacheKeysSize = cacheKeys.size(); index < cacheKeysSize; index++) {
                 DecryptionDekCache.CacheKey<E> cacheKey = cacheKeys.get(index);
-                // ...update (in place) the DecryptState with the decryptor
-                var decryptor = issuedDecryptors.computeIfAbsent(cacheKey, k -> {
-                    Dek<E> dek = cacheKeyDecryptorMap.get(cacheKey);
-                    return dek != null ? dek.decryptor() : null;
-                });
-                states.get(index).withDecryptor(decryptor);
+                if (shreddedKeys.contains(cacheKey)) {
+                    // the KEK is gone: the record is delivered as shredded
+                    states.get(index).withShredded();
+                }
+                else {
+                    // ...update (in place) the DecryptState with the decryptor
+                    var decryptor = issuedDecryptors.computeIfAbsent(cacheKey, k -> {
+                        Dek<E> dek = cacheKeyDecryptorMap.get(cacheKey);
+                        return dek != null ? dek.decryptor() : null;
+                    });
+                    states.get(index).withDecryptor(decryptor);
+                }
             }
             // return the resolved DecryptStates
             return states;
@@ -195,6 +224,18 @@ public class InBandDecryptionManager<K, E> implements DecryptionManager {
                 }
             });
             throw e;
+        }
+    }
+
+    private static <E> void notifyShredded(List<DecryptState<E>> states, IntConsumer shreddedRecordsListener) {
+        int shredded = 0;
+        for (DecryptState<E> state : states) {
+            if (state.isShredded()) {
+                shredded++;
+            }
+        }
+        if (shredded > 0) {
+            shreddedRecordsListener.accept(shredded);
         }
     }
 

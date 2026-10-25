@@ -112,6 +112,7 @@ class RecordEncryptionTest {
         assertThat(config.notFoundAliasExpireAfterWriteDuration()).isEqualTo(Duration.ofSeconds(30));
         assertThat(config.encryptionDekCacheRefreshAfterWriteDuration()).isEqualTo(Duration.ofHours(1));
         assertThat(config.encryptionDekCacheExpireAfterWriteDuration()).isEqualTo(Duration.ofHours(2));
+        assertThat(config.decryptedDekExpireAfterWriteDuration()).isNull();
     }
 
     @Test
@@ -131,6 +132,7 @@ class RecordEncryptionTest {
         experimental.put("notFoundAliasExpireAfterWriteSeconds", null);
         experimental.put("encryptionDekRefreshAfterWriteSeconds", null);
         experimental.put("encryptionDekExpireAfterWriteSeconds", null);
+        experimental.put("decryptedDekExpireAfterWriteSeconds", null);
         KmsCacheConfig config = new RecordEncryptionConfig("vault", 1L, "selector", 1L,
                 experimental, UnresolvedKeyPolicy.PASSTHROUGH_UNENCRYPTED).kmsCache();
         assertThat(config.decryptedDekCacheSize()).isEqualTo(1000);
@@ -141,6 +143,7 @@ class RecordEncryptionTest {
         assertThat(config.notFoundAliasExpireAfterWriteDuration()).isEqualTo(Duration.ofSeconds(30));
         assertThat(config.encryptionDekCacheRefreshAfterWriteDuration()).isEqualTo(Duration.ofHours(1));
         assertThat(config.encryptionDekCacheExpireAfterWriteDuration()).isEqualTo(Duration.ofHours(2));
+        assertThat(config.decryptedDekExpireAfterWriteDuration()).isNull();
     }
 
     @Test
@@ -162,7 +165,8 @@ class RecordEncryptionTest {
                 Duration.ofSeconds(5L),
                 Duration.ofSeconds(6L),
                 Duration.ofSeconds(7L),
-                Duration.ofSeconds(8L));
+                Duration.ofSeconds(8L),
+                Duration.ofSeconds(9L));
 
         Map<String, Object> experimental = new HashMap<>();
         experimental.put("decryptedDekCacheSize", 1);
@@ -173,6 +177,7 @@ class RecordEncryptionTest {
         experimental.put("notFoundAliasExpireAfterWriteSeconds", 6);
         experimental.put("encryptionDekRefreshAfterWriteSeconds", 7);
         experimental.put("encryptionDekExpireAfterWriteSeconds", 8);
+        experimental.put("decryptedDekExpireAfterWriteSeconds", 9);
         KmsCacheConfig config = new RecordEncryptionConfig("vault", 1L, "selector", 1L, experimental, UnresolvedKeyPolicy.PASSTHROUGH_UNENCRYPTED).kmsCache();
         assertThat(config).isEqualTo(kmsCacheConfig);
     }

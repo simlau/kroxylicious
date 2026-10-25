@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.IntConsumer;
 import java.util.stream.LongStream;
 
 import org.apache.kafka.common.errors.NetworkException;
@@ -124,7 +125,7 @@ class RecordEncryptionFilterTest {
         when(encryptionManager.encrypt(any(), anyInt(), any(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(RecordTestUtils.singleElementMemoryRecords("key", "value")));
 
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any()))
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(RecordTestUtils.singleElementMemoryRecords("decrypt", "decrypt")));
 
         encryptionFilter = new RecordEncryptionFilter<>(encryptionManager, decryptionManager, kekSelector, new FilterThreadExecutor(Runnable::run),
@@ -473,7 +474,7 @@ class RecordEncryptionFilterTest {
                 .setTopic(UNRESOLVED_TOPIC)
                 .setPartitions(List.of(new PartitionData().setRecords(makeRecord(HELLO_PLAIN_WORLD)))));
         RuntimeException exception = new RuntimeException("boom");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).build();
 
@@ -492,7 +493,7 @@ class RecordEncryptionFilterTest {
                 .setTopicId(ENCRYPTED_TOPIC_ID)
                 .setPartitions(List.of(new ShareFetchResponseData.PartitionData().setRecords(makeRecord(HELLO_CIPHER_WORLD)))));
         RuntimeException exception = new RuntimeException("boom");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).withTopicName(ENCRYPTED_TOPIC_ID, ENCRYPTED_TOPIC).build();
 
@@ -538,7 +539,7 @@ class RecordEncryptionFilterTest {
                 .setTopic(ENCRYPTED_TOPIC)
                 .setPartitions(List.of(new PartitionData().setRecords(makeRecord(HELLO_CIPHER_WORLD)))));
         RuntimeException exception = new UnknownKeyException("boom");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).withTopicName(ENCRYPTED_TOPIC_ID, ENCRYPTED_TOPIC).build();
 
@@ -563,7 +564,7 @@ class RecordEncryptionFilterTest {
                 .setTopicId(ENCRYPTED_TOPIC_ID)
                 .setPartitions(List.of(new ShareFetchResponseData.PartitionData().setRecords(makeRecord(HELLO_CIPHER_WORLD)))));
         RuntimeException exception = new UnknownKeyException("boom");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).withTopicName(ENCRYPTED_TOPIC_ID, ENCRYPTED_TOPIC).build();
 
@@ -595,8 +596,9 @@ class RecordEncryptionFilterTest {
 
         var fetchResponseData = buildFetchResponseData(anotherResponse, missingKeyResponse);
         RuntimeException exception = new UnknownKeyException("boom");
-        when(decryptionManager.decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
-        when(decryptionManager.decrypt(eq(anotherResponse.topic()), anyInt(), any(), any())).thenReturn(CompletableFuture.completedStage(makeRecord(HELLO_PLAIN_WORLD)));
+        when(decryptionManager.decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(eq(anotherResponse.topic()), anyInt(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedStage(makeRecord(HELLO_PLAIN_WORLD)));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).build();
 
@@ -629,8 +631,8 @@ class RecordEncryptionFilterTest {
 
         var fetchResponseData = buildShareFetchResponseData(anotherResponse, missingKeyResponse);
         RuntimeException exception = new UnknownKeyException("boom");
-        when(decryptionManager.decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
-        when(decryptionManager.decrypt(eq(anotherTopicName), anyInt(), any(), any())).thenReturn(CompletableFuture.completedStage(makeRecord(HELLO_PLAIN_WORLD)));
+        when(decryptionManager.decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(eq(anotherTopicName), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.completedStage(makeRecord(HELLO_PLAIN_WORLD)));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).withTopicName(anotherTopicId, anotherTopicName)
                 .withTopicName(ENCRYPTED_TOPIC_ID, ENCRYPTED_TOPIC).build();
@@ -683,7 +685,7 @@ class RecordEncryptionFilterTest {
                 .setTopic(ENCRYPTED_TOPIC)
                 .setPartitions(List.of(new PartitionData().setRecords(makeRecord(HELLO_CIPHER_WORLD)))));
         RuntimeException exception = new KmsException("boom");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(exception));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, fetchResponseData).build();
 
@@ -706,7 +708,7 @@ class RecordEncryptionFilterTest {
                 .setPartitions(List.of(new PartitionData().setRecords(makeRecord(ENCRYPTED_MESSAGE_BYTES)))));
 
         MemoryRecords decryptedRecords = RecordTestUtils.singleElementMemoryRecords("key", "value");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.completedFuture(decryptedRecords));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(decryptedRecords));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, encryptedFetchResponse).build();
 
@@ -728,6 +730,34 @@ class RecordEncryptionFilterTest {
     }
 
     @Test
+    void shouldCountShreddedRecords() {
+        // Given
+        var encryptedFetchResponse = buildFetchResponseData(new FetchableTopicResponse()
+                .setTopic(ENCRYPTED_TOPIC)
+                .setPartitions(List.of(new PartitionData().setRecords(makeRecord(ENCRYPTED_MESSAGE_BYTES)))));
+        MemoryRecords decryptedRecords = RecordTestUtils.singleElementMemoryRecords("key", "value");
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenAnswer(invocation -> {
+            IntConsumer shreddedRecordsListener = invocation.getArgument(4);
+            shreddedRecordsListener.accept(3);
+            return CompletableFuture.completedFuture(decryptedRecords);
+        });
+        ResponseHeaderData headerData = new ResponseHeaderData();
+        MockFilterContext context = MockFilterContext.builder(headerData, encryptedFetchResponse).withVirtualClusterName("my-cluster").build();
+
+        // When
+        CompletionStage<ResponseFilterResult> response = encryptionFilter.onFetchResponse(FetchResponseData.HIGHEST_SUPPORTED_VERSION,
+                headerData, encryptedFetchResponse, context);
+
+        // Then
+        assertThat(response).succeedsWithin(Duration.ZERO);
+        assertThat(Metrics.globalRegistry.get("kroxylicious_filter_record_encryption_shredded_records")
+                .tag(RecordEncryptionMetrics.VIRTUAL_CLUSTER_LABEL, "my-cluster")
+                .tag(RecordEncryptionMetrics.TOPIC_NAME, ENCRYPTED_TOPIC)
+                .counter().count())
+                .isEqualTo(3);
+    }
+
+    @Test
     void shouldDecryptEncryptedRecordsWhenFetchUsesTopicId() {
         // Given
         var encryptedFetchResponse = buildFetchResponseData(new FetchableTopicResponse()
@@ -735,7 +765,7 @@ class RecordEncryptionFilterTest {
                 .setPartitions(List.of(new PartitionData().setRecords(makeRecord(ENCRYPTED_MESSAGE_BYTES)))));
 
         MemoryRecords decryptedRecords = RecordTestUtils.singleElementMemoryRecords("key", "value");
-        when(decryptionManager.decrypt(any(), anyInt(), any(), any())).thenReturn(CompletableFuture.completedFuture(decryptedRecords));
+        when(decryptionManager.decrypt(any(), anyInt(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(decryptedRecords));
         ResponseHeaderData headerData = new ResponseHeaderData();
         MockFilterContext context = MockFilterContext.builder(headerData, encryptedFetchResponse).withTopicName(ENCRYPTED_TOPIC_ID, ENCRYPTED_TOPIC).build();
 
@@ -755,7 +785,7 @@ class RecordEncryptionFilterTest {
             });
         });
 
-        verify(decryptionManager).decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any());
+        verify(decryptionManager).decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any(), any());
     }
 
     @Test
@@ -787,7 +817,7 @@ class RecordEncryptionFilterTest {
             });
         });
 
-        verify(decryptionManager, never()).decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any());
+        verify(decryptionManager, never()).decrypt(eq(ENCRYPTED_TOPIC), anyInt(), any(), any(), any());
     }
 
     @Test

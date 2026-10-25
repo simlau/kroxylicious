@@ -6,10 +6,14 @@
 
 package io.kroxylicious.filter.encryption.decrypt;
 
+import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 
@@ -19,11 +23,14 @@ import org.slf4j.LoggerFactory;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.github.benmanes.caffeine.cache.Ticker;
 
 import io.kroxylicious.filter.encryption.common.FilterThreadExecutor;
 import io.kroxylicious.filter.encryption.dek.CipherManager;
 import io.kroxylicious.filter.encryption.dek.Dek;
 import io.kroxylicious.filter.encryption.dek.DekManager;
+import io.kroxylicious.kms.service.UnknownKeyException;
+import io.kroxylicious.proxy.tag.VisibleForTesting;
 
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
@@ -91,6 +98,39 @@ public class DecryptionDekCache<K, E> {
     public DecryptionDekCache(@NonNull DekManager<K, E> dekManager,
                               @Nullable Executor dekCacheExecutor,
                               int dekCacheMaxItems) {
+        this(dekManager, dekCacheExecutor, dekCacheMaxItems, null);
+    }
+
+    /**
+     * Creates a decryption DEK cache whose entries may have a maximum lifetime.
+     * @param dekManager the DEK manager used to decrypt encrypted DEKs on a cache miss.
+     * @param dekCacheExecutor the executor used to load cache entries, or null to use the cache's default executor.
+     * @param dekCacheMaxItems the maximum number of DEKs to cache, or {@link #NO_MAX_CACHE_SIZE} for no maximum.
+     * @param expireAfterWrite how long after being loaded a DEK is removed from the cache, however often it is read,
+     * or null for no maximum lifetime.
+     */
+    public DecryptionDekCache(@NonNull DekManager<K, E> dekManager,
+                              @Nullable Executor dekCacheExecutor,
+                              int dekCacheMaxItems,
+                              @Nullable Duration expireAfterWrite) {
+        this(dekManager, dekCacheExecutor, dekCacheMaxItems, expireAfterWrite, Ticker.systemTicker());
+    }
+
+    /**
+     * Creates a decryption DEK cache whose entries may have a maximum lifetime.
+     * @param dekManager the DEK manager used to decrypt encrypted DEKs on a cache miss.
+     * @param dekCacheExecutor the executor used to load cache entries, or null to use the cache's default executor.
+     * @param dekCacheMaxItems the maximum number of DEKs to cache, or {@link #NO_MAX_CACHE_SIZE} for no maximum.
+     * @param expireAfterWrite how long after being loaded a DEK is removed from the cache, however often it is read,
+     * or null for no maximum lifetime.
+     * @param ticker the time source of the cache.
+     */
+    @VisibleForTesting
+    DecryptionDekCache(@NonNull DekManager<K, E> dekManager,
+                       @Nullable Executor dekCacheExecutor,
+                       int dekCacheMaxItems,
+                       @Nullable Duration expireAfterWrite,
+                       @NonNull Ticker ticker) {
         this.dekManager = Objects.requireNonNull(dekManager);
         Caffeine<Object, Object> cache = Caffeine.newBuilder();
         if (dekCacheMaxItems != NO_MAX_CACHE_SIZE) {
@@ -99,7 +139,11 @@ public class DecryptionDekCache<K, E> {
         if (dekCacheExecutor != null) {
             cache.executor(dekCacheExecutor);
         }
+        if (expireAfterWrite != null) {
+            cache.expireAfterWrite(expireAfterWrite);
+        }
         this.decryptorCache = cache
+                .ticker(Objects.requireNonNull(ticker))
                 .removalListener(this::afterCacheEviction)
                 .buildAsync(this::loadDek);
     }
@@ -146,5 +190,44 @@ public class DecryptionDekCache<K, E> {
     public @NonNull CompletionStage<Map<CacheKey<E>, Dek<E>>> getAll(@NonNull List<CacheKey<E>> cacheKeys,
                                                                      @NonNull FilterThreadExecutor filterThreadExecutor) {
         return filterThreadExecutor.completingOnFilterThread(decryptorCache.getAll(cacheKeys));
+    }
+
+    /**
+     * Gets the DEKs for all the given cache keys, loading each distinct key separately so that a key whose KEK
+     * the KMS reports as unknown does not fail the others.
+     * A failed load is not cached, as with {@link #getAll(List, FilterThreadExecutor)}.
+     * @param cacheKeys The cache keys
+     * @param filterThreadExecutor The filter thread executor
+     * @return A completion stage which completes on the filter thread with a map holding, for each encrypted cache key,
+     * the DEK, or an empty optional if the KMS failed the load with {@link UnknownKeyException}.
+     * Cache keys of unencrypted records are absent from the map.
+     * The stage fails if any load fails with any other exception.
+     */
+    public @NonNull CompletionStage<Map<CacheKey<E>, Optional<Dek<E>>>> getAllAllowingUnknownKeys(@NonNull List<CacheKey<E>> cacheKeys,
+                                                                                                  @NonNull FilterThreadExecutor filterThreadExecutor) {
+        Map<CacheKey<E>, CompletableFuture<Optional<Dek<E>>>> loads = new HashMap<>();
+        for (CacheKey<E> cacheKey : cacheKeys) {
+            if (!cacheKey.isUnencrypted()) {
+                loads.computeIfAbsent(cacheKey, k -> decryptorCache.get(k).handle(DecryptionDekCache::dekOrEmptyIfUnknownKey));
+            }
+        }
+        CompletableFuture<Map<CacheKey<E>, Optional<Dek<E>>>> all = CompletableFuture.allOf(loads.values().toArray(CompletableFuture[]::new))
+                .thenApply(ignored -> {
+                    Map<CacheKey<E>, Optional<Dek<E>>> result = HashMap.newHashMap(loads.size());
+                    loads.forEach((cacheKey, load) -> result.put(cacheKey, load.join()));
+                    return result;
+                });
+        return filterThreadExecutor.completingOnFilterThread(all);
+    }
+
+    private static <E> Optional<Dek<E>> dekOrEmptyIfUnknownKey(@Nullable Dek<E> dek, @Nullable Throwable throwable) {
+        if (throwable == null) {
+            return Optional.ofNullable(dek);
+        }
+        Throwable cause = throwable instanceof CompletionException && throwable.getCause() != null ? throwable.getCause() : throwable;
+        if (cause instanceof UnknownKeyException) {
+            return Optional.empty();
+        }
+        throw throwable instanceof CompletionException completionException ? completionException : new CompletionException(throwable);
     }
 }

@@ -57,8 +57,10 @@ public record RecordEncryptionConfig(@JsonProperty(required = true) @PluginImplN
         Long notFoundAliasExpireAfterWriteSeconds = getExperimentalLong("notFoundAliasExpireAfterWriteSeconds");
         Long encryptionDekRefreshAfterWriteSeconds = getExperimentalLong("encryptionDekRefreshAfterWriteSeconds");
         Long encryptionDekExpireAfterWriteSeconds = getExperimentalLong("encryptionDekExpireAfterWriteSeconds");
+        Long decryptedDekExpireAfterWriteSeconds = getExperimentalLong("decryptedDekExpireAfterWriteSeconds");
         return new KmsCacheConfig(decryptedDekCacheSize, decryptedDekExpireAfterAccessSeconds, resolvedAliasCacheSize, resolvedAliasExpireAfterWriteSeconds,
-                resolvedAliasRefreshAfterWriteSeconds, notFoundAliasExpireAfterWriteSeconds, encryptionDekRefreshAfterWriteSeconds, encryptionDekExpireAfterWriteSeconds);
+                resolvedAliasRefreshAfterWriteSeconds, notFoundAliasExpireAfterWriteSeconds, encryptionDekRefreshAfterWriteSeconds, encryptionDekExpireAfterWriteSeconds,
+                decryptedDekExpireAfterWriteSeconds);
     }
 
     /**

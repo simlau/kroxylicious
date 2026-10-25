@@ -27,6 +27,7 @@ import io.kroxylicious.kms.service.UnknownAliasException;
 import io.kroxylicious.proxy.tag.VisibleForTesting;
 
 import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.Nullable;
 
 /**
  * Kms implementation that caches results from a delegate where appropriate.
@@ -47,12 +48,13 @@ public class CachingKms<K, E> implements Kms<K, E> {
     private CachingKms(@NonNull Kms<K, E> delegate,
                        long decryptDekCacheMaxSize,
                        @NonNull Duration decryptDekExpireAfterAccess,
+                       @Nullable Duration decryptDekExpireAfterWrite,
                        long resolveAliasCacheMaxSize,
                        @NonNull Duration resolveAliasExpireAfterWrite,
                        @NonNull Duration resolveAliasRefreshAfterWrite,
                        @NonNull Duration notFoundAliasExpireAfterWrite) {
         this.delegate = delegate;
-        decryptDekCache = buildDecryptedDekCache(delegate, decryptDekCacheMaxSize, decryptDekExpireAfterAccess);
+        decryptDekCache = buildDecryptedDekCache(delegate, decryptDekCacheMaxSize, decryptDekExpireAfterAccess, decryptDekExpireAfterWrite);
         resolveAliasCache = buildResolveAliasCache(delegate, resolveAliasCacheMaxSize, resolveAliasExpireAfterWrite, resolveAliasRefreshAfterWrite);
         notFoundAliasCache = Caffeine.newBuilder().expireAfterWrite(notFoundAliasExpireAfterWrite).build();
     }
@@ -78,8 +80,37 @@ public class CachingKms<K, E> implements Kms<K, E> {
                                         Duration resolveAliasExpireAfterWrite,
                                         Duration resolveAliasRefreshAfterWrite,
                                         Duration notFoundAliasExpireAfterWrite) {
-        return new CachingKms<>(delegate, decryptDekCacheMaxSize, decryptDekExpireAfterAccess, resolveAliasCacheMaxSize, resolveAliasExpireAfterWrite,
+        return wrap(delegate, decryptDekCacheMaxSize, decryptDekExpireAfterAccess, null, resolveAliasCacheMaxSize, resolveAliasExpireAfterWrite,
                 resolveAliasRefreshAfterWrite, notFoundAliasExpireAfterWrite);
+    }
+
+    /**
+     * Wraps the given KMS with caching of resolved aliases and decrypted DEKs, where a decrypted DEK may have a maximum lifetime.
+     * @param delegate the KMS to be wrapped.
+     * @param decryptDekCacheMaxSize the maximum number of decrypted DEKs to cache.
+     * @param decryptDekExpireAfterAccess how long after last access a decrypted DEK is removed from the cache.
+     * @param decryptDekExpireAfterWrite how long after being cached a decrypted DEK is removed from the cache, however often it is read,
+     * or null for no maximum lifetime.
+     * @param resolveAliasCacheMaxSize the maximum number of resolved aliases to cache.
+     * @param resolveAliasExpireAfterWrite how long after being cached a resolved alias is removed from the cache.
+     * @param resolveAliasRefreshAfterWrite how long after being cached a resolved alias becomes eligible for a refresh.
+     * @param notFoundAliasExpireAfterWrite how long an unresolvable alias is remembered before the delegate is asked to resolve it again.
+     * @param <A> The type of Key Encryption Key id.
+     * @param <B> The type of encrypted Data Encryption Key.
+     * @return a caching KMS wrapping the delegate.
+     */
+    @NonNull
+    @SuppressWarnings("java:S107") // mirrors the cache options one-to-one
+    public static <A, B> Kms<A, B> wrap(Kms<A, B> delegate,
+                                        long decryptDekCacheMaxSize,
+                                        Duration decryptDekExpireAfterAccess,
+                                        @Nullable Duration decryptDekExpireAfterWrite,
+                                        long resolveAliasCacheMaxSize,
+                                        Duration resolveAliasExpireAfterWrite,
+                                        Duration resolveAliasRefreshAfterWrite,
+                                        Duration notFoundAliasExpireAfterWrite) {
+        return new CachingKms<>(delegate, decryptDekCacheMaxSize, decryptDekExpireAfterAccess, decryptDekExpireAfterWrite, resolveAliasCacheMaxSize,
+                resolveAliasExpireAfterWrite, resolveAliasRefreshAfterWrite, notFoundAliasExpireAfterWrite);
     }
 
     @NonNull
@@ -89,9 +120,13 @@ public class CachingKms<K, E> implements Kms<K, E> {
     }
 
     @NonNull
-    private static <K, E> AsyncLoadingCache<E, SecretKey> buildDecryptedDekCache(Kms<K, E> delegate, long maxSize, Duration expireAfterAccess) {
-        return Caffeine.newBuilder().maximumSize(maxSize).expireAfterAccess(expireAfterAccess)
-                .buildAsync((key, executor) -> delegate.decryptEdek(key).toCompletableFuture());
+    private static <K, E> AsyncLoadingCache<E, SecretKey> buildDecryptedDekCache(Kms<K, E> delegate, long maxSize, Duration expireAfterAccess,
+                                                                                 @Nullable Duration expireAfterWrite) {
+        Caffeine<Object, Object> builder = Caffeine.newBuilder().maximumSize(maxSize).expireAfterAccess(expireAfterAccess);
+        if (expireAfterWrite != null) {
+            builder.expireAfterWrite(expireAfterWrite);
+        }
+        return builder.buildAsync((key, executor) -> delegate.decryptEdek(key).toCompletableFuture());
     }
 
     @NonNull

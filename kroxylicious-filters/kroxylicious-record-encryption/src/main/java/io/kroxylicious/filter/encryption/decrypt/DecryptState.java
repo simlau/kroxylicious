@@ -15,7 +15,8 @@ import edu.umd.cs.findbugs.annotations.Nullable;
 
 /**
  * Helper class to group together some state for decryption.
- * Either both, or neither, of the given {@code decryptionVersion} and {@code encryptor} should be null.
+ * Either both, or neither, of the given {@code decryptionVersion} and {@code encryptor} should be null,
+ * except for a shredded record (see {@link #isShredded()}), which has an encryption but no decryptor.
  * @param <E> The type of encrypted DEK.
  */
 public final class DecryptState<E> {
@@ -31,6 +32,7 @@ public final class DecryptState<E> {
     private final Encryption encryptionUsed;
     @Nullable
     private Dek<E>.Decryptor decryptor;
+    private boolean shredded;
 
     /**
      * Creates a decrypt state without a decryptor.
@@ -61,6 +63,28 @@ public final class DecryptState<E> {
     }
 
     /**
+     * Marks the record as shredded: it was encrypted, but the KMS reports its KEK as unknown,
+     * so it is delivered without its value.
+     * @return this decrypt state.
+     */
+    public DecryptState<E> withShredded() {
+        if (isNone()) {
+            throw new IllegalStateException("an unencrypted record cannot be shredded");
+        }
+        this.decryptor = null;
+        this.shredded = true;
+        return this;
+    }
+
+    /**
+     * Returns whether the record is shredded: it was encrypted, but the KMS reports its KEK as unknown.
+     * @return true if the record is shredded.
+     */
+    public boolean isShredded() {
+        return shredded;
+    }
+
+    /**
      * Returns the encryption used by the record being decrypted, or null if the record was not encrypted.
      * @return the encryption used by the record being decrypted, or null if the record was not encrypted.
      */
@@ -87,19 +111,21 @@ public final class DecryptState<E> {
         }
         var that = (DecryptState) obj;
         return Objects.equals(this.encryptionUsed, that.encryptionUsed) &&
-                Objects.equals(this.decryptor, that.decryptor);
+                Objects.equals(this.decryptor, that.decryptor) &&
+                this.shredded == that.shredded;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(encryptionUsed, decryptor);
+        return Objects.hash(encryptionUsed, decryptor, shredded);
     }
 
     @Override
     public String toString() {
         return "DecryptState[" +
                 "decryptionVersion=" + encryptionUsed + ", " +
-                "decryptor=" + decryptor + ']';
+                "decryptor=" + decryptor + ", " +
+                "shredded=" + shredded + ']';
     }
 
 }

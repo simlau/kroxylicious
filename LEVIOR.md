@@ -13,6 +13,19 @@ Vault KMS provider: only a missing key is "not found". `VaultKms` maps HTTP 404,
 `encryption key not found`, to `UnknownKeyException` / `UnknownAliasException`. Every other non-200 (other 400s such as
 `cipher: message authentication failed`, 403, 5xx) is a plain `KmsException`. Stock Kroxylicious treats every 400 as not found.
 
+Decrypt: deliver shredded records. `InBandDecryptionManager` takes a `deliverShredded` flag. When it is set, EDEKs are resolved
+per cache key, and a record whose KEK the KMS reports as unknown (`UnknownKeyException`, see above) is delivered as shredded:
+value `null`, the `kroxylicious.io/encryption` header removed, all other headers in their order, then `X-Shredded: true`
+(UTF-8) appended; key, offset and timestamp unchanged. Other records of the same partition decrypt as usual, and unencrypted
+records and tombstones pass through unchanged. Any other KMS error still fails the fetch. The counter
+`kroxylicious_filter_record_encryption_shredded_records` (tags `virtual_cluster`, `topic_name`) counts shredded records.
+`DecryptionManager.decrypt` takes a listener for the shredded count, and the filter feeds the counter. The stock `RecordEncryption` filter passes
+`false` and keeps the upstream behaviour (`RESOURCE_NOT_FOUND`).
+
+Decrypted-DEK lifetime. New experimental option `decryptedDekExpireAfterWriteSeconds`: how long after being loaded a decrypted
+DEK is dropped, however often it is read. It applies to both decrypt-side caches (`DecryptionDekCache` and the decrypted-DEK
+cache in `CachingKms`). Unset means the upstream behaviour (no hard lifetime).
+
 More entries are added by later tasks.
 
 ## Build and test
@@ -38,7 +51,7 @@ The workflow `.github/workflows/levior.yaml` runs the same two commands on every
     git fetch upstream tag <new tag> --no-tags
     git rebase --onto <new tag> v0.25.1 levior
 
-Then update the `v0.25.1` mentions in this file and in `.github/workflows/levior.yaml`, and run the build above.
+Then update the `v0.25.1` mentions in this file and run the build above.
 
 ## Release
 

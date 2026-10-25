@@ -382,7 +382,11 @@ class RecordEncryptionFilter<K> implements ProduceRequestFilter, FetchResponseFi
 
     private <T> CompletionStage<T> maybeDecodeRecords(String topicName, MemoryRecords memoryRecords, FilterContext context, int partition,
                                                       Function<MemoryRecords, T> setRecords) {
-        return decryptionManager.decrypt(topicName, partition, memoryRecords, context::createByteBufferOutputStream).thenApply(setRecords);
+        return decryptionManager.decrypt(topicName, partition, memoryRecords, context::createByteBufferOutputStream,
+                shreddedRecords -> RecordEncryptionMetrics.shreddedRecordsCounter(context.getVirtualClusterName())
+                        .withTags(RecordEncryptionMetrics.TOPIC_NAME, topicName)
+                        .increment(shreddedRecords))
+                .thenApply(setRecords);
     }
 
     private static boolean isEncryptionException(Throwable throwable) {

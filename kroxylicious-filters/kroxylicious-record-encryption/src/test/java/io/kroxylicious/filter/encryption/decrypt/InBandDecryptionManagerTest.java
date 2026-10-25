@@ -15,11 +15,14 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
 import java.util.stream.Stream;
 
 import javax.crypto.SecretKey;
@@ -60,6 +63,7 @@ import io.kroxylicious.kms.provider.kroxylicious.inmemory.InMemoryEdek;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.InMemoryKms;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.UnitTestingKmsService;
 import io.kroxylicious.kms.service.KmsException;
+import io.kroxylicious.kms.service.UnknownKeyException;
 import io.kroxylicious.testing.filter.assertj.MemoryRecordsAssert;
 import io.kroxylicious.testing.filter.record.RecordTestUtils;
 
@@ -82,6 +86,9 @@ class InBandDecryptionManagerTest {
     private static final String ARBITRARY_VALUE = "value";
     private static final String ARBITRARY_VALUE_2 = "value2";
     private static final Header[] ABSENT_HEADERS = {};
+    private static final Header SHREDDED_HEADER = new RecordHeader("X-Shredded", "true".getBytes(StandardCharsets.UTF_8));
+    private static final IntConsumer IGNORE_SHREDDED = count -> {
+    };
 
     @Test
     void shouldBeAbleToDependOnRecordHeaderEquality() {
@@ -288,7 +295,7 @@ class InBandDecryptionManagerTest {
     private static CompletionStage<Void> doDecrypt(
                                                    InBandDecryptionManager<UUID, InMemoryEdek> decryptionManager, String topic, int partition, List<Record> encrypted,
                                                    List<Record> decrypted) {
-        return decryptionManager.decrypt(topic, partition, RecordTestUtils.memoryRecords(encrypted), ByteBufferOutputStream::new)
+        return decryptionManager.decrypt(topic, partition, RecordTestUtils.memoryRecords(encrypted), ByteBufferOutputStream::new, IGNORE_SHREDDED)
                 .thenAccept(records -> records.records().forEach(decrypted::add));
     }
 
@@ -359,7 +366,7 @@ class InBandDecryptionManagerTest {
     void decryptSupportsEmptyRecordBatches(MemoryRecords records) {
         InMemoryKms kms = getInMemoryKms();
         var decryptionManager = createDecryptionManager(kms);
-        assertThat(decryptionManager.decrypt("foo", 1, records, ByteBufferOutputStream::new))
+        assertThat(decryptionManager.decrypt("foo", 1, records, ByteBufferOutputStream::new, IGNORE_SHREDDED))
                 .succeedsWithin(Duration.ZERO).isSameAs(records);
     }
 
@@ -970,6 +977,125 @@ class InBandDecryptionManagerTest {
                 .succeedsWithin(1, TimeUnit.NANOSECONDS);
     }
 
+    @Test
+    void shreddedRecordDeliveredAsNull() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var kekId = kms.generateKey();
+        var encryptionManager = createEncryptionManager(kms, 500_000);
+        var decryptionManager = createDecryptionManager(kms, true);
+        Header[] headers = { new RecordHeader("X-Kek-Id", "alice".getBytes(StandardCharsets.UTF_8)),
+                new RecordHeader("other", new byte[]{ 1, 2 }) };
+        var rec1 = RecordTestUtils.record(10L, 1000L, ARBITRARY_KEY, ARBITRARY_VALUE, headers);
+        var rec2 = RecordTestUtils.record(11L, 1001L, ARBITRARY_KEY_2, ARBITRARY_VALUE_2, headers);
+        List<Record> encrypted = new ArrayList<>();
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(kekId, EnumSet.of(RecordField.RECORD_VALUE)), List.of(rec1, rec2), encrypted);
+        kms.deleteKey(kekId);
+
+        var shreddedRecords = new AtomicInteger();
+
+        // When
+        List<Record> decrypted = new ArrayList<>();
+        var stage = decryptionManager.decrypt("topic", 1, RecordTestUtils.memoryRecords(encrypted), ByteBufferOutputStream::new, shreddedRecords::addAndGet)
+                .thenAccept(records -> records.records().forEach(decrypted::add));
+
+        // Then
+        assertThat(stage).succeedsWithin(Duration.ZERO);
+        Header[] expectedHeaders = { headers[0], headers[1], SHREDDED_HEADER };
+        assertThat(decrypted).hasSize(2);
+        assertThat(decrypted).allSatisfy(r -> {
+            assertThat(r.hasValue()).isFalse();
+            assertThat(r.headers()).containsExactly(expectedHeaders);
+        });
+        assertThat(decrypted).extracting(Record::offset).containsExactly(10L, 11L);
+        assertThat(decrypted).extracting(Record::timestamp).containsExactly(1000L, 1001L);
+        assertThat(decrypted).extracting(RecordTestUtils::recordKeyAsString).containsExactly(ARBITRARY_KEY, ARBITRARY_KEY_2);
+        assertThat(shreddedRecords).hasValue(2);
+    }
+
+    @Test
+    void shreddedLiveAndTombstonesInOnePartition() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var goneKekId = kms.generateKey();
+        var liveKekId = kms.generateKey();
+        var encryptionManager = createEncryptionManager(kms, 500_000);
+        var decryptionManager = createDecryptionManager(kms, true);
+        Header[] headers = { new RecordHeader("X-Kek-Id", "bob".getBytes(StandardCharsets.UTF_8)) };
+        var goneRecord = RecordTestUtils.record(0L, 0L, ARBITRARY_KEY, ARBITRARY_VALUE, headers);
+        var liveRecord = RecordTestUtils.record(1L, 0L, ARBITRARY_KEY, ARBITRARY_VALUE_2, headers);
+        var plainRecord = RecordTestUtils.record(2L, 0L, ARBITRARY_KEY, "plain", headers);
+        var tombstone = RecordTestUtils.record(3L, 0L, ARBITRARY_KEY, null, headers);
+        List<Record> input = new ArrayList<>();
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(goneKekId, EnumSet.of(RecordField.RECORD_VALUE)), List.of(goneRecord), input);
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(liveKekId, EnumSet.of(RecordField.RECORD_VALUE)), List.of(liveRecord), input);
+        input.add(plainRecord);
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(goneKekId, EnumSet.of(RecordField.RECORD_VALUE)), List.of(tombstone), input);
+        kms.deleteKey(goneKekId);
+
+        // When
+        List<Record> decrypted = new ArrayList<>();
+        var stage = doDecrypt(decryptionManager, "topic", 1, input, decrypted);
+
+        // Then
+        assertThat(stage).succeedsWithin(Duration.ZERO);
+        assertThat(decrypted).extracting(Record::offset).containsExactly(0L, 1L, 2L, 3L);
+        assertThat(decrypted).extracting(RecordTestUtils::recordValueAsString).containsExactly(null, ARBITRARY_VALUE_2, "plain", null);
+        assertThat(decrypted).extracting(Record::headers).containsExactly(
+                new Header[]{ headers[0], SHREDDED_HEADER },
+                headers,
+                headers,
+                headers);
+    }
+
+    @Test
+    void otherKmsErrorsStillFail() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var kekId = kms.generateKey();
+        InMemoryKms spyKms = spy(kms);
+        doReturn(CompletableFuture.failedFuture(new KmsException("cipher: message authentication failed"))).when(spyKms).decryptEdek(any());
+        var encryptionManager = createEncryptionManager(spyKms, 500_000);
+        var decryptionManager = createDecryptionManager(spyKms, true);
+        List<Record> encrypted = new ArrayList<>();
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(kekId, EnumSet.of(RecordField.RECORD_VALUE)),
+                List.of(RecordTestUtils.record(ARBITRARY_VALUE)), encrypted);
+
+        // When
+        var stage = doDecrypt(decryptionManager, "topic", 1, encrypted, new ArrayList<>());
+
+        // Then
+        assertThat(stage).failsWithin(Duration.ZERO)
+                .withThrowableThat()
+                .havingRootCause()
+                .isExactlyInstanceOf(KmsException.class)
+                .withMessage("cipher: message authentication failed");
+    }
+
+    @Test
+    void stockBehaviourUnchanged() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var kekId = kms.generateKey();
+        var encryptionManager = createEncryptionManager(kms, 500_000);
+        var decryptionManager = createDecryptionManager(kms, false);
+        List<Record> encrypted = new ArrayList<>();
+        doEncrypt(encryptionManager, "topic", 1, new EncryptionScheme<>(kekId, EnumSet.of(RecordField.RECORD_VALUE)),
+                List.of(RecordTestUtils.record(ARBITRARY_VALUE)), encrypted);
+        kms.deleteKey(kekId);
+
+        // When
+        var stage = decryptionManager.decrypt("topic", 1, RecordTestUtils.memoryRecords(encrypted), ByteBufferOutputStream::new, IGNORE_SHREDDED);
+
+        // Then
+        assertThat(stage.toCompletableFuture()).isCompletedExceptionally();
+        assertThat(stage.handle((records, throwable) -> throwable))
+                .succeedsWithin(Duration.ZERO)
+                .isInstanceOf(CompletionException.class)
+                .extracting(Throwable::getCause)
+                .isExactlyInstanceOf(UnknownKeyException.class);
+    }
+
     public TestingDek getSerializedGeneratedEdek(InMemoryKms kms, int i) {
         var generatedEdek = kms.getGeneratedEdek(i);
         var edek = generatedEdek.edek();
@@ -1006,13 +1132,19 @@ class InBandDecryptionManagerTest {
 
     @NonNull
     private static InBandDecryptionManager<UUID, InMemoryEdek> createDecryptionManager(InMemoryKms kms) {
+        return createDecryptionManager(kms, false);
+    }
+
+    @NonNull
+    private static InBandDecryptionManager<UUID, InMemoryEdek> createDecryptionManager(InMemoryKms kms, boolean deliverShredded) {
 
         DekManager<UUID, InMemoryEdek> dekManager = new DekManager<>(kms, 1);
         var dekCache = new DecryptionDekCache<>(dekManager, directExecutor(), DecryptionDekCache.NO_MAX_CACHE_SIZE);
         return new InBandDecryptionManager<>(EncryptionResolver.ALL,
                 dekManager,
                 dekCache,
-                new FilterThreadExecutor(directExecutor()));
+                new FilterThreadExecutor(directExecutor()),
+                deliverShredded);
     }
 
     @NonNull
@@ -1055,7 +1187,7 @@ class InBandDecryptionManagerTest {
 
     @NonNull
     private static CompletionStage<MemoryRecords> decrypt(InBandDecryptionManager<UUID, InMemoryEdek> km, MemoryRecords encrypted) {
-        return km.decrypt("topic", 1, encrypted, ByteBufferOutputStream::new);
+        return km.decrypt("topic", 1, encrypted, ByteBufferOutputStream::new, IGNORE_SHREDDED);
     }
 
     @NonNull
