@@ -7,7 +7,6 @@
 package io.kroxylicious.filter.encryption.config;
 
 import java.util.Map;
-import java.util.Optional;
 
 import edu.umd.cs.findbugs.annotations.Nullable;
 
@@ -17,6 +16,9 @@ import edu.umd.cs.findbugs.annotations.Nullable;
  * Keeping the parsing here means every filter factory understands the same experimental properties.
  */
 public interface CommonEncryptionConfig {
+
+    /** The experimental property bounding how long a decrypted DEK is cached, however often it is read. */
+    String DECRYPTED_DEK_EXPIRE_AFTER_WRITE_SECONDS = "decryptedDekExpireAfterWriteSeconds";
 
     /**
      * Returns the name of the KMS service implementation providing the key management.
@@ -49,7 +51,7 @@ public interface CommonEncryptionConfig {
         Long notFoundAliasExpireAfterWriteSeconds = getExperimentalLong("notFoundAliasExpireAfterWriteSeconds");
         Long encryptionDekRefreshAfterWriteSeconds = getExperimentalLong("encryptionDekRefreshAfterWriteSeconds");
         Long encryptionDekExpireAfterWriteSeconds = getExperimentalLong("encryptionDekExpireAfterWriteSeconds");
-        Long decryptedDekExpireAfterWriteSeconds = getExperimentalLong("decryptedDekExpireAfterWriteSeconds");
+        Long decryptedDekExpireAfterWriteSeconds = getExperimentalLong(DECRYPTED_DEK_EXPIRE_AFTER_WRITE_SECONDS);
         return new KmsCacheConfig(decryptedDekCacheSize, decryptedDekExpireAfterAccessSeconds, resolvedAliasCacheSize, resolvedAliasExpireAfterWriteSeconds,
                 resolvedAliasRefreshAfterWriteSeconds, notFoundAliasExpireAfterWriteSeconds, encryptionDekRefreshAfterWriteSeconds, encryptionDekExpireAfterWriteSeconds,
                 decryptedDekExpireAfterWriteSeconds);
@@ -81,19 +83,11 @@ public interface CommonEncryptionConfig {
     }
 
     private Integer getExperimentalIntOrElse(String property, Integer defaultValue) {
-        return Optional.ofNullable(experimental().get(property)).map(value -> switch (value) {
-            case Number number -> number.intValue();
-            case String stringValue -> Integer.parseInt(stringValue);
-            default -> throw new IllegalArgumentException("could not convert " + property + " with type " + value.getClass().getSimpleName() + " to Integer");
-        }).orElse(defaultValue);
+        return ExperimentalProperties.intOrElse(experimental(), property, defaultValue);
     }
 
     @Nullable
     private Long getExperimentalLong(String property) {
-        return Optional.ofNullable(experimental().get(property)).map(value -> switch (value) {
-            case Number number -> number.longValue();
-            case String stringValue -> Long.parseLong(stringValue);
-            default -> throw new IllegalArgumentException("could not convert " + property + " with type " + value.getClass().getSimpleName() + " to Long");
-        }).orElse(null);
+        return ExperimentalProperties.longOrNull(experimental(), property);
     }
 }

@@ -6,7 +6,11 @@
 
 package io.kroxylicious.filter.encryption;
 
+import java.time.Duration;
 import java.util.Objects;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.kroxylicious.filter.encryption.common.FilterThreadExecutor;
 import io.kroxylicious.filter.encryption.config.HeaderRecordEncryptionConfig;
@@ -29,6 +33,8 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 @Plugin(configType = HeaderRecordEncryptionConfig.class)
 public class HeaderRecordEncryption<K, E> implements FilterFactory<HeaderRecordEncryptionConfig, SharedEncryptionContext<K, E, HeaderRecordEncryptionConfig>> {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(HeaderRecordEncryption.class);
+
     /**
      * Creates a new factory instance, invoked by the plugin framework.
      */
@@ -41,6 +47,12 @@ public class HeaderRecordEncryption<K, E> implements FilterFactory<HeaderRecordE
     public SharedEncryptionContext<K, E, HeaderRecordEncryptionConfig> initialize(FilterFactoryContext context,
                                                                                   @NonNull HeaderRecordEncryptionConfig configuration)
             throws PluginConfigurationException {
+        Objects.requireNonNull(configuration, "configuration must not be null");
+        Duration decryptedDekLifetime = configuration.kmsCache().decryptedDekExpireAfterWriteDuration();
+        LOGGER.atInfo()
+                .addKeyValue("decryptedDekExpireAfterWriteSeconds", decryptedDekLifetime.toSeconds())
+                .addKeyValue("defaulted", !configuration.experimental().containsKey(HeaderRecordEncryptionConfig.DECRYPTED_DEK_EXPIRE_AFTER_WRITE_SECONDS))
+                .log("Decrypted DEK lifetime: records of a deleted KEK stay readable through this proxy for at most decryptedDekExpireAfterWriteSeconds");
         return RecordEncryption.initializeSharedContext(context, configuration);
     }
 

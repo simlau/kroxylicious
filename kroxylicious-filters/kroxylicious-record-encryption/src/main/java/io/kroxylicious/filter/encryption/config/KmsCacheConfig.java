@@ -74,6 +74,18 @@ public record KmsCacheConfig(
                 mapNotNull(decryptedDekExpireAfterWriteSeconds, Duration::ofSeconds));
     }
 
+    /**
+     * Returns a copy of this config with the given maximum lifetime of a decrypted DEK.
+     * @param decryptedDekExpireAfterWriteDuration How long after being cached a decrypted DEK is removed from the caches,
+     * or null for no such limit.
+     * @return the copy.
+     */
+    public KmsCacheConfig withDecryptedDekExpireAfterWriteDuration(@Nullable Duration decryptedDekExpireAfterWriteDuration) {
+        return new KmsCacheConfig(decryptedDekCacheSize, decryptedDekExpireAfterAccessDuration, resolvedAliasCacheSize, resolvedAliasExpireAfterWriteDuration,
+                resolvedAliasRefreshAfterWriteDuration, notFoundAliasExpireAfterWriteDuration, encryptionDekCacheRefreshAfterWriteDuration,
+                encryptionDekCacheExpireAfterWriteDuration, decryptedDekExpireAfterWriteDuration);
+    }
+
     static <T, Y> Y mapNotNull(T t, Function<T, Y> function) {
         return t == null ? null : function.apply(t);
     }

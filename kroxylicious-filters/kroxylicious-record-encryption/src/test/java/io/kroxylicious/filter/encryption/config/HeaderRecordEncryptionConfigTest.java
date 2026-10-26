@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -33,14 +34,17 @@ class HeaderRecordEncryptionConfigTest {
      * The proxy config sketch of the design (levior/infra, docs/superpowers/specs/2026-10-22-openbao-crypto-shredding-design.md, section 3).
      */
     private static final String SPEC_YAML = """
+            clusterDefinitions:
+              - name: levior-kafka
+                bootstrapServers: levior-kafka-bootstrap.kafka.svc:9092
             virtualClusters:
               - name: levior
-                targetCluster:
-                  bootstrapServers: levior-kafka-bootstrap.kafka.svc:9092
+                target:
+                  cluster: levior-kafka
                 gateways:
                   - name: in-cluster
                     portIdentifiesNode:
-                      bootstrapAddress: kroxylicious.levior.svc:9192
+                      bootstrapAddress: kroxylicious.simlau-lab.svc:9192
             filterDefinitions:
               - name: encrypt
                 type: HeaderRecordEncryption
@@ -48,7 +52,7 @@ class HeaderRecordEncryptionConfigTest {
                   kms: VaultKmsService
                   kmsConfig:
                     vaultUrl: http://openbao-active.openbao.svc:8200
-                    vaultNamespace: simlau-playground   # or the path prefix /v1/simlau-playground
+                    vaultNamespace: simlau-lab   # or the path prefix /v1/simlau-lab
                     transitEnginePath: transit
                     credentials:
                       kubernetes:
@@ -59,6 +63,8 @@ class HeaderRecordEncryptionConfigTest {
                     template: "user-kek-$(headerValue)"
                     missingHeader: REJECT
                   unresolvedKeyPolicy: REJECT
+                  experimental:
+                    decryptedDekExpireAfterWriteSeconds: 3600
             defaultFilters: [encrypt]
             """;
 
@@ -80,7 +86,7 @@ class HeaderRecordEncryptionConfigTest {
         assertThat(config.selector()).isEqualTo("HeaderKekSelector");
         assertThat(config.selectorConfig()).isEqualTo(new HeaderKekSelectorConfig("X-Kek-Id", "user-kek-$(headerValue)", MissingHeaderPolicy.REJECT));
         assertThat(config.unresolvedKeyPolicy()).isEqualTo(UnresolvedKeyPolicy.REJECT);
-        assertThat(config.experimental()).isEmpty();
+        assertThat(config.kmsCache().decryptedDekExpireAfterWriteDuration()).isEqualTo(Duration.ofHours(1));
     }
 
     @Test
@@ -184,6 +190,73 @@ class HeaderRecordEncryptionConfigTest {
         assertThat(kmsCache.decryptedDekExpireAfterWriteDuration()).isEqualTo(Duration.ofHours(1));
         assertThat(header.encryptionBuffer()).isEqualTo(stock.encryptionBuffer());
         assertThat(header.dekManager()).isEqualTo(stock.dekManager());
+    }
+
+    @Test
+    void decryptedDekLifetimeDefaultsToOneHour() {
+        // Given
+        var header = new HeaderRecordEncryptionConfig("kms", null, "HeaderKekSelector", SELECTOR_CONFIG, null, null);
+        var stock = new RecordEncryptionConfig("kms", null, "selector", null, null, null);
+
+        // When
+        KmsCacheConfig kmsCache = header.kmsCache();
+
+        // Then
+        assertThat(kmsCache.decryptedDekExpireAfterWriteDuration()).isEqualTo(Duration.ofSeconds(3600));
+        assertThat(kmsCache.withDecryptedDekExpireAfterWriteDuration(null)).isEqualTo(stock.kmsCache());
+        assertThat(stock.kmsCache().decryptedDekExpireAfterWriteDuration()).isNull();
+    }
+
+    @Test
+    void decryptedDekLifetimeDefaultAppliesWhenOptionIsMisspelt() {
+        // Given
+        var header = new HeaderRecordEncryptionConfig("kms", null, "HeaderKekSelector", SELECTOR_CONFIG,
+                Map.of("decryptedDekExpireAfterWriteSecond", 60), null);
+
+        // When / Then
+        assertThat(header.kmsCache().decryptedDekExpireAfterWriteDuration()).isEqualTo(Duration.ofHours(1));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "600", "86400" })
+    void explicitDecryptedDekLifetimeKept(String seconds) {
+        // Given
+        var header = new HeaderRecordEncryptionConfig("kms", null, "HeaderKekSelector", SELECTOR_CONFIG,
+                Map.of("decryptedDekExpireAfterWriteSeconds", Long.parseLong(seconds)), null);
+
+        // When / Then
+        assertThat(header.kmsCache().decryptedDekExpireAfterWriteDuration()).isEqualTo(Duration.ofSeconds(Long.parseLong(seconds)));
+    }
+
+    static Stream<Arguments> nonPositiveDecryptedDekLifetimeRejected() {
+        return Stream.of(
+                argumentSet("zero", 0),
+                argumentSet("negative", -1),
+                argumentSet("zero as string", "0"));
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    void nonPositiveDecryptedDekLifetimeRejected(Object seconds) {
+        // When / Then
+        assertThatThrownBy(() -> new HeaderRecordEncryptionConfig("kms", null, "HeaderKekSelector", SELECTOR_CONFIG,
+                Map.of("decryptedDekExpireAfterWriteSeconds", seconds), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("decryptedDekExpireAfterWriteSeconds must be a positive number of seconds");
+    }
+
+    @Test
+    void nonPositiveDecryptedDekLifetimeRejectedWhenParsed() {
+        // Given
+        String yaml = configYaml("HeaderKekSelector", "X-Kek-Id", "user-kek-$(headerValue)") + """
+                experimental:
+                    decryptedDekExpireAfterWriteSeconds: 0
+                """;
+
+        // When / Then
+        assertThatThrownBy(() -> MAPPER.readValue(yaml, HeaderRecordEncryptionConfig.class))
+                .isInstanceOf(JsonMappingException.class)
+                .hasMessageContaining("decryptedDekExpireAfterWriteSeconds must be a positive number of seconds");
     }
 
     private static String configYaml(String selector, String header, String template) {
