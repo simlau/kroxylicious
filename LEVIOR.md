@@ -20,26 +20,34 @@ Decrypt: deliver shredded records. `InBandDecryptionManager` takes a `deliverShr
 per cache key, and a record whose KEK the KMS reports as unknown (`UnknownKeyException`, see above) is delivered as shredded:
 value `null`, the `kroxylicious.io/encryption` header removed, all other headers in their order, then `X-Shredded: true`
 (UTF-8) appended; key, offset and timestamp unchanged. Other records of the same partition decrypt as usual, and unencrypted
-records and tombstones pass through unchanged. Any other KMS error still fails the fetch. The counter
+records and tombstones pass through unchanged. Any other KMS error still fails the fetch, and so does a DEK load that
+completes without a DEK (a `KmsException`): only `UnknownKeyException` yields a shredded record, because consumers delete data
+when they see one. The counter
 `kroxylicious_filter_record_encryption_shredded_records` (tags `virtual_cluster`, `topic_name`) counts shredded records.
 `DecryptionManager.decrypt` takes a listener for the shredded count, and the filter feeds the counter. The stock `RecordEncryption` filter passes
 `false` and keeps the upstream behaviour (`RESOURCE_NOT_FOUND`).
 
 Decrypted-DEK lifetime. New experimental option `decryptedDekExpireAfterWriteSeconds`: how long after being loaded a decrypted
 DEK is dropped, however often it is read. It applies to both decrypt-side caches (`DecryptionDekCache` and the decrypted-DEK
-cache in `CachingKms`). Unset means the upstream behaviour (no hard lifetime).
+cache in `CachingKms`). For the stock `RecordEncryption`, unset means the upstream behaviour: `DecryptionDekCache` has no size
+bound and no expiry, so a decrypted DEK stays cached until the proxy restarts. For `HeaderRecordEncryption`, unset means 3600 s
+(also when the key is misspelt, since unknown `experimental` keys are ignored), a value of 0 or less is a config error, and the
+factory logs the effective lifetime at INFO on start (`Decrypted DEK lifetime: ...`, with `decryptedDekExpireAfterWriteSeconds`
+and `defaulted`).
 
 Filter `HeaderRecordEncryption`: the KEK per record from a header. A second filter factory next to the stock
 `RecordEncryption`, registered the same way (`@Plugin`, `META-INF/services/io.kroxylicious.proxy.filter.FilterFactory`). It
 builds the same KMS stack (instrumented, resilient, caching) and DEK caches from the same `kms`, `kmsConfig` and `experimental`
 options (the parsing is shared through `CommonEncryptionConfig`, so `decryptedDekExpireAfterWriteSeconds` reaches both decrypt
 caches here too). On produce, every record of the request is checked first: the header value must be 1 to 64 characters from
-`[A-Za-z0-9_-]` and occur once; a record carrying `X-Shredded` (any value, any letter case) is a forged shredded marker; with
+`[A-Za-z0-9_-]` and occur once; a record carrying `X-Shredded` (any value, any letter case) is a forged shredded marker; a record
+carrying `kroxylicious.io/encryption` is a forged encryption header (it could name a missing KEK and be delivered as shredded); with
 `missingHeader: REJECT` a record without the header is invalid. Any of these rejects the whole produce request with
 `INVALID_RECORD` before any KMS call. Then the distinct aliases (`template` with `$(headerValue)` replaced) are resolved through the
 KMS, an unknown alias rejects the request with `INVALID_RECORD` (`unresolvedKeyPolicy: REJECT`, the default here), and each
 partition is encrypted in one pass, each record with the current DEK of its own KEK (`EncryptionManager.encryptPerRecord`). Only
-the record value is encrypted; the headers, including `X-Kek-Id`, stay in plaintext. On fetch it delivers shredded records
+the record value is encrypted; the headers, including `X-Kek-Id`, stay in plaintext. A tombstone (`null` value) gets the same
+header checks, but its alias is not resolved: it passes through unencrypted, even if its key is gone, and counts as a plain record. On fetch it delivers shredded records
 (`deliverShredded`, see above). The proxy never creates keys.
 
 Fetch: the proxy owns `X-Shredded`. With `deliverShredded` (that is, under `HeaderRecordEncryption`), `RecordDecryptor` removes
@@ -53,8 +61,6 @@ end offset), a foreign `X-Shredded`, a re-created key and OpenBao down (both fai
 `X-Kek-Id`. The proxy uses a token with only the proxy policy of `levior/openbao` `tofu/modules/transit-app`, in namespace
 `simlau-playground`.
 
-More entries are added by later tasks.
-
 ## Consumer contract
 
 What a consumer reading through `HeaderRecordEncryption` gets:
@@ -66,7 +72,13 @@ What a consumer reading through `HeaderRecordEncryption` gets:
   (`INVALID_RECORD`), and on fetch any `X-Shredded` header already on a record (written by a client that bypassed the proxy, or
   before the proxy existed) is removed. The proxy adds exactly one `X-Shredded: true`, and only to records it shredded. So a
   fetched `X-Shredded: true` always means the proxy found the KEK gone. (Both directions match the header name in any letter
-  case.)
+  case.) A produced record carrying `kroxylicious.io/encryption` is rejected the same way, so a client cannot make the proxy
+  shred a record by naming a missing KEK in its own encryption header. This guarantee holds for records written through the
+  proxy with `missingHeader: REJECT` and `unresolvedKeyPolicy: REJECT`. A client that writes to the brokers directly can store
+  an encrypted-looking record naming a missing KEK, and the proxy delivers it as shredded.
+- One bad record fails the whole produce request: an invalid or missing `X-Kek-Id`, a reserved header or an unknown key rejects
+  every record in the request with `INVALID_RECORD` (non-retriable), including records of other users that the producer batched
+  with it. A producer whose send fails with `INVALID_RECORD` may retry that record once on its own.
 
 `null` plus `X-Shredded: true` therefore means cryptographically erased: OpenBao answered that the record's KEK does not exist.
 The proxy delivers the record instead of failing the fetch, so the consumer keeps its position and reads on.
@@ -77,18 +89,24 @@ aggregation that ignores `null` values keeps the earlier contributions of the er
 value into a database keeps that copy. Such apps must handle `X-Shredded` themselves.
 
 A deleted key takes effect on fetch once the proxy's decrypted DEKs of that key have expired, at most
-`decryptedDekExpireAfterWriteSeconds` after the fetch that loaded them (3600 s in the Levior config). Until then, records still
-decrypt.
+`decryptedDekExpireAfterWriteSeconds` after the fetch that loaded them (3600 s in the Levior config, and the default for
+`HeaderRecordEncryption`). Until then, records still decrypt.
 
 Tombstones: a record with a `null` value is never encrypted and passes through unchanged in both directions (on fetch only a
-foreign `X-Shredded` is removed). It is still checked on produce like any other record: under `missingHeader: REJECT` a tombstone
-without `X-Kek-Id`, a tombstone with an invalid `X-Kek-Id`, and under `unresolvedKeyPolicy: REJECT` a tombstone whose `X-Kek-Id`
-names a key OpenBao does not have, reject the whole produce request with `INVALID_RECORD`. So a compaction delete for a user whose
-key is already gone is rejected.
+foreign `X-Shredded` is removed). On produce it gets the same header checks as any other record: under `missingHeader: REJECT`
+a tombstone without `X-Kek-Id`, a tombstone with an invalid or repeated `X-Kek-Id`, or one carrying `X-Shredded` or
+`kroxylicious.io/encryption`, rejects the whole produce request with `INVALID_RECORD`. But its key is not looked up: a
+tombstone whose `X-Kek-Id` names a key OpenBao no longer has is accepted, so a compaction delete after the user's key is gone
+works.
 
 Other KMS failures are not shredding. A re-created key (OpenBao answers 400 `cipher: message authentication failed`), a wrong
 mount (404 `no handler for route`), a wrong namespace or policy (403), 5xx and an unreachable OpenBao fail the fetch: the proxy
 closes the connection and the client retries without progress until the cause is fixed. No record is marked shredded.
+
+The proxy policy is a safety interlock, not just least privilege. The proxy token may use only `<mount>/.../user-kek-*` of its
+own transit mount. If it could reach another transit mount, a `transitEnginePath` pointing there would answer 400
+`encryption key not found` for every key, and every record would be delivered as shredded, so consumers would delete their
+state. Keep the policy scoped to the one mount and the `user-kek-` prefix.
 
 ## Behaviour change for the stock filter
 
@@ -121,7 +139,7 @@ filterDefinitions:
       kms: VaultKmsService
       kmsConfig:
         vaultUrl: http://openbao-active.openbao.svc:8200
-        vaultNamespace: simlau-playground   # or the path prefix /v1/simlau-playground
+        vaultNamespace: simlau-lab   # or the path prefix /v1/simlau-lab
         transitEnginePath: transit
         credentials:
           kubernetes:
@@ -145,7 +163,7 @@ defaultFilters: [encrypt]
 | `selectorConfig.template` | yes | | KEK alias; must contain `$(headerValue)` exactly once and no other placeholder. |
 | `selectorConfig.missingHeader` | no | `REJECT` | `REJECT` or `PASSTHROUGH_UNENCRYPTED` for a record without the header. |
 | `unresolvedKeyPolicy` | no | `REJECT` | `REJECT` or `PASSTHROUGH_UNENCRYPTED` for a header naming a key the KMS doesn't have (stock default is `PASSTHROUGH_UNENCRYPTED`). |
-| `experimental` | no | | The same options as `RecordEncryption`, including `decryptedDekExpireAfterWriteSeconds`. |
+| `experimental` | no | | The same options as `RecordEncryption`, including `decryptedDekExpireAfterWriteSeconds`, which here defaults to `3600` and must be positive. |
 
 Caches still apply on produce: a resolved alias is cached for up to `resolvedAliasExpireAfterWriteSeconds` (10 min) and the
 current DEK of a KEK for up to `encryptionDekExpireAfterWriteSeconds` (2 h). A record produced shortly after its key was deleted
@@ -177,14 +195,19 @@ The steps live in the composite action `.github/actions/levior-build`, shared wi
     git fetch upstream tag <new tag> --no-tags
     git rebase --onto <new tag> v0.25.1 levior
 
-Then update the `v0.25.1` mentions in this file and run the build above.
+Then update the version everywhere it is hardcoded, and run the build above:
+
+- this file (the `v0.25.1` and `0.25.1` mentions);
+- `.github/workflows/levior-release.yaml`: the tag filter `v0.25.1-levior.*` and the jar paths `...-0.25.1.jar` in the
+  "Collect assets" step. If the tag filter is not updated, a `v<new>-levior.1` tag triggers no release, and nothing reports it.
 
 ## Release
 
 Pushing a tag `v0.25.1-levior.<N>` runs `.github/workflows/levior-release.yaml`. It fails unless the tagged commit is
 reachable from `origin/levior`, runs the same build and tests as `levior.yaml`, and creates the GitHub Release with
 `kroxylicious-record-encryption-0.25.1-levior.<N>.jar`, `kroxylicious-kms-provider-hashicorp-vault-0.25.1-levior.<N>.jar`
-and `SHA256SUMS`. It uses only `GITHUB_TOKEN`.
+and `SHA256SUMS`. It uses only `GITHUB_TOKEN`, and only the "Create release" step gets it: the checkout does not persist
+credentials, so the build and tests run without a write-scoped token.
 
 To release: wait for a green `levior` run on the commit (`gh run list -R simlau/kroxylicious -b levior`; `cancel-in-progress`
 can cancel runs, so tag only a commit with a successful run), then
