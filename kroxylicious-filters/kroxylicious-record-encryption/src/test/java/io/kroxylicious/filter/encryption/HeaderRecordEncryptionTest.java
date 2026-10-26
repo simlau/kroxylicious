@@ -237,6 +237,79 @@ class HeaderRecordEncryptionTest {
     }
 
     @Test
+    void clientMadeEncryptionHeaderRejected() {
+        // Given
+        var filter = createFilter(MissingHeaderPolicy.PASSTHROUGH_UNENCRYPTED);
+        String idA = UUID.randomUUID().toString();
+        createKek(idA);
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(
+                RecordTestUtils.record(0L, 100L, "k0", "v0", new Header[]{ kekHeader(idA) }),
+                RecordTestUtils.record(1L, 101L, "k1", "v1", new Header[]{ new RecordHeader(EncryptionHeader.ENCRYPTION_HEADER_NAME, new byte[]{ 2 }) })));
+
+        // When
+        CompletionStage<RequestFilterResult> result = produce(filter, records);
+
+        // Then
+        assertInvalidRecordResponse(result);
+        verifyNoInteractions(kms);
+    }
+
+    @Test
+    void tombstoneNamingDeletedKekPassesUnencrypted() {
+        // Given
+        var filter = createFilter(MissingHeaderPolicy.REJECT);
+        String deletedId = UUID.randomUUID().toString();
+        String idB = UUID.randomUUID().toString();
+        UUID deletedKek = createKek(deletedId);
+        createKek(idB);
+        kms.deleteAlias("user-kek-" + deletedId);
+        kms.deleteKey(deletedKek);
+        clearInvocations(kms);
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(
+                RecordTestUtils.record(0L, 100L, "k0", (String) null, new Header[]{ kekHeader(deletedId), OTHER_HEADER }),
+                RecordTestUtils.record(1L, 101L, "k1", "v1", new Header[]{ kekHeader(idB) })));
+
+        // When
+        List<Record> produced = forwardedRecords(produce(filter, records));
+
+        // Then
+        assertThat(produced).hasSize(2);
+        assertThat(produced.get(0).hasValue()).isFalse();
+        assertThat(produced.get(0).headers()).containsExactly(kekHeader(deletedId), OTHER_HEADER);
+        assertThat(RecordTestUtils.recordKeyAsString(produced.get(0))).isEqualTo("k0");
+        assertThat(produced.get(1).headers()).extracting(Header::key).contains(EncryptionHeader.ENCRYPTION_HEADER_NAME);
+        verify(kms, never()).resolveAlias("user-kek-" + deletedId);
+        assertThat(meterRegistry.get("kroxylicious_filter_record_encryption_encrypted_records").counter().count()).isEqualTo(1);
+        assertThat(meterRegistry.get("kroxylicious_filter_record_encryption_plain_records").counter().count()).isEqualTo(1);
+    }
+
+    static Stream<Arguments> tombstoneHeadersStillChecked() {
+        return Stream.of(
+                argumentSet("no X-Kek-Id", (Object) new Header[]{ OTHER_HEADER }),
+                argumentSet("invalid X-Kek-Id", (Object) new Header[]{ kekHeader("../x") }),
+                argumentSet("two X-Kek-Id headers", (Object) new Header[]{ kekHeader("a"), kekHeader("a") }),
+                argumentSet("X-Shredded", (Object) new Header[]{ kekHeader("a"), new RecordHeader("X-Shredded", "true".getBytes(UTF_8)) }),
+                argumentSet("client-made encryption header",
+                        (Object) new Header[]{ kekHeader("a"), new RecordHeader(EncryptionHeader.ENCRYPTION_HEADER_NAME, new byte[]{ 2 }) }));
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    void tombstoneHeadersStillChecked(Header[] headers) {
+        // Given
+        var filter = createFilter(MissingHeaderPolicy.REJECT);
+        MemoryRecords records = RecordTestUtils.memoryRecords(List.of(
+                RecordTestUtils.record(0L, 100L, "k0", (String) null, headers)));
+
+        // When
+        CompletionStage<RequestFilterResult> result = produce(filter, records);
+
+        // Then
+        assertInvalidRecordResponse(result);
+        verifyNoInteractions(kms);
+    }
+
+    @Test
     void missingHeaderRejects() {
         // Given
         var filter = createFilter(MissingHeaderPolicy.REJECT);

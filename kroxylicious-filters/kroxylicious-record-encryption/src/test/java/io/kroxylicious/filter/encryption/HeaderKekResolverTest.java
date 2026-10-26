@@ -127,6 +127,27 @@ class HeaderKekResolverTest {
     }
 
     @Test
+    void clientMadeEncryptionHeaderRejected() {
+        // Given
+        Record record = record(kekHeader("abc"), new RecordHeader("kroxylicious.io/encryption", new byte[]{ 2 }));
+
+        // When / Then
+        assertThatThrownBy(() -> RESOLVER.aliasFor(record))
+                .isInstanceOf(InvalidHeaderException.class)
+                .hasMessageContaining("kroxylicious.io/encryption");
+    }
+
+    @Test
+    void clientMadeEncryptionHeaderRejectedWithoutKekHeader() {
+        // Given
+        Record record = record(new RecordHeader("kroxylicious.io/encryption", new byte[]{ 2 }));
+
+        // When / Then
+        assertThatThrownBy(() -> RESOLVER.aliasFor(record))
+                .isInstanceOf(InvalidHeaderException.class);
+    }
+
+    @Test
     void rejectionDoesNotEchoHeaderValue() {
         // Given
         Record record = record(kekHeader("secret/../value"));

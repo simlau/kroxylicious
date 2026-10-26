@@ -10,6 +10,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 import io.kroxylicious.filter.encryption.config.HeaderKekSelectorConfig;
+import io.kroxylicious.filter.encryption.crypto.EncryptionHeader;
 import io.kroxylicious.filter.encryption.decrypt.RecordDecryptor;
 import io.kroxylicious.kafka.common.header.Header;
 import io.kroxylicious.kafka.common.record.internal.Record;
@@ -23,6 +24,8 @@ import static java.nio.charset.StandardCharsets.US_ASCII;
  * A header value is valid only if it is 1 to {@value #MAX_VALUE_LENGTH} characters from {@code [A-Za-z0-9_-]}
  * and the header occurs once on the record. A record carrying the {@value RecordDecryptor#SHREDDED_HEADER_NAME}
  * header (in any letter case) is rejected, because the proxy reserves it for records it delivers as shredded.
+ * So is a record carrying the {@value EncryptionHeader#ENCRYPTION_HEADER_NAME} header: the proxy writes it itself, and a
+ * client-made one could name a missing KEK and so make the proxy deliver the record as shredded.
  */
 class HeaderKekResolver {
 
@@ -46,13 +49,16 @@ class HeaderKekResolver {
      * @param kafkaRecord the record.
      * @return the KEK alias, or empty if the record has no KEK header.
      * @throws InvalidHeaderException if the KEK header is repeated or has an invalid value, or the record
-     * carries the {@value RecordDecryptor#SHREDDED_HEADER_NAME} header.
+     * carries the {@value RecordDecryptor#SHREDDED_HEADER_NAME} or the {@value EncryptionHeader#ENCRYPTION_HEADER_NAME} header.
      */
     Optional<String> aliasFor(@NonNull Record kafkaRecord) {
         Header kekHeader = null;
         for (Header header : kafkaRecord.headers()) {
             if (RecordDecryptor.SHREDDED_HEADER_NAME.equalsIgnoreCase(header.key())) {
                 throw new InvalidHeaderException("record header " + RecordDecryptor.SHREDDED_HEADER_NAME + " is reserved for the proxy");
+            }
+            if (EncryptionHeader.ENCRYPTION_HEADER_NAME.equals(header.key())) {
+                throw new InvalidHeaderException("record header " + EncryptionHeader.ENCRYPTION_HEADER_NAME + " is reserved for the proxy");
             }
             if (headerName.equals(header.key())) {
                 if (kekHeader != null) {

@@ -131,10 +131,18 @@ class HeaderRecordEncryptionFilter<K> extends RecordEncryptionFilter<K> {
         return result;
     }
 
+    /**
+     * Returns the KEK alias of the given record, or null if it is passed through unencrypted.
+     * A tombstone (a record without a value) has nothing to encrypt, so its headers are checked as for any record,
+     * but its alias is not resolved: it passes through unencrypted even if its KEK is gone.
+     */
     private @Nullable String aliasOrNull(Record kafkaRecord) {
         Optional<String> alias = kekResolver.aliasFor(kafkaRecord);
         if (alias.isEmpty() && missingHeaderPolicy == MissingHeaderPolicy.REJECT) {
             throw new InvalidHeaderException("record has no " + kekResolver.headerName() + " header");
+        }
+        if (!kafkaRecord.hasValue()) {
+            return null;
         }
         return alias.orElse(null);
     }
