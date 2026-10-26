@@ -15,11 +15,12 @@ jobs:
       contents: write
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # The build and tests must not see a write-scoped token: only the "Create release" step gets one.
+          persist-credentials: false
       - name: The tag must be on branch levior
         run: |
           git fetch origin levior
@@ -39,6 +40,8 @@ jobs:
             "release/kroxylicious-kms-provider-hashicorp-vault-${version}.jar"
           (cd release && sha256sum *.jar > SHA256SUMS && cat SHA256SUMS)
       - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "$GITHUB_REF_NAME" --target levior --title "$GITHUB_REF_NAME"
           --notes "Kroxylicious 0.25.1 plus the Levior patch set (see LEVIOR.md)."
