@@ -29,6 +29,7 @@ import io.kroxylicious.filter.encryption.common.FilterThreadExecutor;
 import io.kroxylicious.filter.encryption.dek.CipherManager;
 import io.kroxylicious.filter.encryption.dek.Dek;
 import io.kroxylicious.filter.encryption.dek.DekManager;
+import io.kroxylicious.kms.service.KmsException;
 import io.kroxylicious.kms.service.UnknownKeyException;
 import io.kroxylicious.proxy.tag.VisibleForTesting;
 
@@ -201,7 +202,8 @@ public class DecryptionDekCache<K, E> {
      * @return A completion stage which completes on the filter thread with a map holding, for each encrypted cache key,
      * the DEK, or an empty optional if the KMS failed the load with {@link UnknownKeyException}.
      * Cache keys of unencrypted records are absent from the map.
-     * The stage fails if any load fails with any other exception.
+     * The stage fails if any load fails with any other exception, or completes without a DEK: only an unknown key
+     * yields an empty optional, because consumers act on a shredded record by deleting data.
      */
     public @NonNull CompletionStage<Map<CacheKey<E>, Optional<Dek<E>>>> getAllAllowingUnknownKeys(@NonNull List<CacheKey<E>> cacheKeys,
                                                                                                   @NonNull FilterThreadExecutor filterThreadExecutor) {
@@ -222,7 +224,10 @@ public class DecryptionDekCache<K, E> {
 
     private static <E> Optional<Dek<E>> dekOrEmptyIfUnknownKey(@Nullable Dek<E> dek, @Nullable Throwable throwable) {
         if (throwable == null) {
-            return Optional.ofNullable(dek);
+            if (dek == null) {
+                throw new CompletionException(new KmsException("loading the DEK of an encrypted record returned no DEK"));
+            }
+            return Optional.of(dek);
         }
         Throwable cause = throwable instanceof CompletionException && throwable.getCause() != null ? throwable.getCause() : throwable;
         if (cause instanceof UnknownKeyException) {

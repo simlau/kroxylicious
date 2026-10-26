@@ -8,7 +8,9 @@ package io.kroxylicious.filter.encryption.decrypt;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -23,11 +25,14 @@ import io.kroxylicious.filter.encryption.dek.DekManager;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.InMemoryEdek;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.InMemoryKms;
 import io.kroxylicious.kms.provider.kroxylicious.inmemory.UnitTestingKmsService;
+import io.kroxylicious.kms.service.KmsException;
 
 import edu.umd.cs.findbugs.annotations.Nullable;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -72,6 +77,41 @@ class DecryptionDekCacheTest {
         // Then
         assertThat(deks).succeedsWithin(Duration.ZERO);
         verify(kms, times(1)).decryptEdek(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void loadWithoutDekFailsInsteadOfShredding() {
+        // Given
+        DekManager<UUID, InMemoryEdek> dekManager = mock(DekManager.class);
+        doReturn(CompletableFuture.completedFuture(null)).when(dekManager).decryptEdek(any(), any());
+        var cache = new DecryptionDekCache<>(dekManager, DIRECT_EXECUTOR, DecryptionDekCache.NO_MAX_CACHE_SIZE, null, ticker);
+        var cacheKey = cacheKey(getInMemoryKms());
+
+        // When
+        var deks = cache.getAllAllowingUnknownKeys(List.of(cacheKey), FILTER_THREAD_EXECUTOR);
+
+        // Then
+        assertThat(deks).failsWithin(Duration.ZERO)
+                .withThrowableThat()
+                .havingRootCause()
+                .isInstanceOf(KmsException.class)
+                .withMessageContaining("returned no DEK");
+    }
+
+    @Test
+    void unknownKeyIsShredded() {
+        // Given
+        InMemoryKms kms = getInMemoryKms();
+        var cacheKey = cacheKey(kms);
+        var cache = createCache(kms, null);
+        kms.deleteKey(cacheKey.edek().kekRef());
+
+        // When
+        var deks = cache.getAllAllowingUnknownKeys(List.of(cacheKey), FILTER_THREAD_EXECUTOR);
+
+        // Then
+        assertThat(deks).succeedsWithin(Duration.ZERO).satisfies(map -> assertThat(map).containsEntry(cacheKey, Optional.empty()));
     }
 
     private void readEvery500MillisUntil(DecryptionDekCache<UUID, InMemoryEdek> cache, DecryptionDekCache.CacheKey<InMemoryEdek> cacheKey, Duration until) {
