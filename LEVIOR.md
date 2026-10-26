@@ -2,7 +2,7 @@
 
 This branch (`levior`) is upstream Kroxylicious `v0.25.1` plus a small patch set for the Levior platform.
 It adds the `HeaderRecordEncryption` filter, which picks the KEK from a record header, for per-user crypto-shredding.
-Design: `levior/infra`, `docs/superpowers/specs/2026-10-22-openbao-crypto-shredding-design.md`, section 3.
+Design: `simlau-lab/docs` (code.levior.io), `specs/2026-10-22-openbao-crypto-shredding-design.md`, section 3.
 
 Only the record-encryption filter module and the HashiCorp Vault KMS provider are changed.
 The project version stays `0.25.1`. Never push to `main` of the fork.
